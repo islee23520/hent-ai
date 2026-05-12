@@ -1,8 +1,13 @@
-# Hent-ai 🎭
+# Hent-ai : Let your AI agent express its hent!!
+<img width="294.5" height="363.5" alt="image" src="https://github.com/user-attachments/assets/fea635e3-9a20-4676-954f-464a1595c0e1" />
 
 > *Let your AI agent express its hent (intent).*
 
+---
+
 **Emotion Image Attachment Plugin for OpenClaw**
+
+"Hent" is a coined word meaning "intent".
 
 Automatically classifies the emotion of every bot response using LLM and attaches a matching emotion image to Discord messages.
 
@@ -17,7 +22,7 @@ Automatically classifies the emotion of every bot response using LLM and attache
 | `confused` | Uncertainty, questions |
 | `focused` | Working, investigating, debugging |
 
-## Installation
+## Quick Start
 
 ### Prerequisites
 
