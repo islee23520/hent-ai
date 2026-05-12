@@ -1,0 +1,46 @@
+{
+  "name": "@openclaw/emotion-image",
+  "version": "2026.5.6",
+  "description": "Detect emotion keywords in agent replies and attach mapped images via Discord API.",
+  "type": "module",
+  "main": "./index.ts",
+  "exports": {
+    ".": "./index.ts"
+  },
+  "files": [
+    "index.ts",
+    "openclaw.plugin.json",
+    "assets/",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "peerDependencies": {
+    "@openclaw/plugin-sdk": ">=2026.4.0"
+  },
+  "devDependencies": {
+    "@openclaw/plugin-sdk": "workspace:*",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "license": "MIT",
+  "keywords": [
+    "openclaw",
+    "plugin",
+    "discord",
+    "emotion",
+    "image"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/IYENTeam/claw-onichan"
+  }
+}
