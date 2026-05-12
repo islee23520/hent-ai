@@ -712,11 +712,13 @@ export default definePluginEntry({
         } catch (err) {
           api.logger.warn(`emotion-image: thinking image send failed: ${err}`);
         }
-      }, { name: "emotion-image-thinking" });
-    }
+       }, { name: "emotion-image-thinking" });
+     }
 
-    // Phase 2: On bot message sent, LLM classifies emotion and appends image
-    api.on("message_sent", async (event, ctx) => {
+     const channelQueues = new Map<string, Promise<void>>();
+
+     // Phase 2: On bot message sent, LLM classifies emotion and appends image
+     api.on("message_sent", async (event, ctx) => {
       const {
         to,
         content,
@@ -775,10 +777,18 @@ export default definePluginEntry({
            return;
          }
 
-        api.logger.info(`emotion-image: appending ${finalEmotion} image for msg=${messageId}`);
-        await appendImageToMessage(botToken!, channelId, messageId, finalImagePath, api.logger);
-      };
-      classifyAndAppend();
+         api.logger.info(`emotion-image: appending ${finalEmotion} image for msg=${messageId}`);
+         await appendImageToMessage(botToken!, channelId, messageId, finalImagePath, api.logger);
+       };
+
+       const prev = channelQueues.get(channelId) ?? Promise.resolve();
+       const next = prev.then(classifyAndAppend).catch((err) => {
+         api.logger.error(`emotion-image: classifyAndAppend failed for msg=${messageId}: ${err}`);
+       });
+       channelQueues.set(channelId, next);
+       next.finally(() => {
+         if (channelQueues.get(channelId) === next) channelQueues.delete(channelId);
+       });
     }, { name: "emotion-image-sent" });
   },
 });
