@@ -33,12 +33,15 @@ jobs:
         with:
           version: 9
 
-      - name: Strip workspace dependencies
+      - name: Strip OpenClaw SDK dependencies (not published to npm)
         run: node -e "
           const fs = require('fs');
           const pkg = JSON.parse(fs.readFileSync('package.json','utf8'));
-          for (const [k,v] of Object.entries(pkg.devDependencies || {})) {
-            if (String(v).startsWith('workspace:')) delete pkg.devDependencies[k];
+          for (const section of ['devDependencies','peerDependencies','dependencies']) {
+            if (!pkg[section]) continue;
+            for (const [k,v] of Object.entries(pkg[section])) {
+              if (k.startsWith('@openclaw/')) delete pkg[section][k];
+            }
           }
           fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2));
           "
