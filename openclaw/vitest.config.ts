@@ -8,7 +8,7 @@ export default defineConfig({
   resolve: {
     alias: {
       "openclaw/plugin-sdk/plugin-entry": resolve(here, "test/stubs/plugin-entry.ts"),
-      "@hent-ai/generate": resolve(here, "..", "generate", "src", "index.ts"),
+      "@hent-ai/generate": resolve(here, "test", "stubs", "generate.ts"),
     },
   },
   test: {
