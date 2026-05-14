@@ -31,7 +31,7 @@ Choose your platform:
 
 You need 6 images that visually represent each emotion. There are three ways to set them up:
 
-- **Discord Onboarding (easiest)** — Send `onboarding` in Discord and the bot walks you through generating each image interactively with feedback. See [`openclaw/README.md`](./openclaw/README.md#onboarding).
+- **Discord Onboarding (easiest)** — Send `onboarding` in Discord and the bot walks you through generating each image interactively with feedback. During each emotion step, you can also attach your own image to use it directly. See [`openclaw/README.md`](./openclaw/README.md#onboarding).
 - **CLI** — Run `hent-ai generate` from the command line (Option A below).
 - **Manual** — Create images yourself with any tool (Option B below).
 
@@ -99,6 +99,8 @@ mv your-confused-image.png assets/confused.png
 mv your-focused-image.png assets/focused.png
 mv your-loyalty-image.png assets/loyalty.png
 ```
+
+You can also configure multiple images per emotion with labels. Hent-ai automatically infers labels from filenames such as `happy-date-night.png` (`date night`) and prefers a matching labeled image when that context appears in the bot response.
 
 ### Tips for Better Images
 

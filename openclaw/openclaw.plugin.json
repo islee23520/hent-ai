@@ -20,8 +20,30 @@
       },
       "emotionMap": {
         "type": "object",
-        "description": "Mapping from emotion tag to image filename (overrides built-in defaults).",
-        "additionalProperties": { "type": "string" }
+        "description": "Mapping from emotion tag to one image filename or a labeled image pool. Labeled pools are randomly selected at runtime.",
+        "additionalProperties": {
+          "oneOf": [
+            { "type": "string" },
+            {
+              "type": "array",
+              "items": {
+                "oneOf": [
+                  { "type": "string" },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "file": { "type": "string" },
+                      "filename": { "type": "string" },
+                      "label": { "type": "string" },
+                      "weight": { "type": "number", "minimum": 0 }
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
       },
       "defaultEmotion": {
         "type": "string",

@@ -11,7 +11,7 @@ Automatically classifies the emotion of every bot response using LLM and attache
 - [OpenClaw](https://github.com/openclaw/openclaw) installed and running
 - A Discord bot token (provide via env var or plugin config — see [Discord Bot Token](#discord-bot-token))
 - An LLM provider configured in OpenClaw for emotion classification
-- **Emotion images** — You need 6 PNG images, one for each emotion. Generate or create your own images and name them:
+- **Emotion images** — You need at least 6 PNG images, one for each emotion. Generate or create your own images and name them:
    - `happy.png`
    - `neutral.png`
    - `loyalty.png`
@@ -20,6 +20,7 @@ Automatically classifies the emotion of every bot response using LLM and attache
    - `focused.png`
 
    Place them in the `assets/` directory inside the plugin, or set a custom `imageDir` in the config.
+   You can also add multiple pre-labeled images per emotion and configure `emotionMap` as an image pool; the plugin randomly selects one variant each time that emotion is shown.
 
 ### Step 1: Clone the Repository
 
@@ -106,11 +107,15 @@ Add the plugin configuration to your `openclaw.json` (or via `openclaw config`):
            // Optional: override default emotion (defaults to "neutral")
            // "defaultEmotion": "neutral",
 
-           // Optional: override emotion-to-filename mapping (filenames only, no paths)
-           // "emotionMap": {
-           //   "happy": "happy.png",
-           //   "neutral": "neutral.png"
-           // }
+            // Optional: override emotion-to-filename mapping or define labeled image pools
+            // "emotionMap": {
+            //   "happy": "happy.png",
+            //   "neutral": "neutral.png",
+            //   "focused": [
+            //     { "file": "focused-coding.png", "label": "coding" },
+            //     { "file": "focused-reading.png", "label": "reading", "weight": 2 }
+            //   ]
+            // }
          }
        }
      }
@@ -156,7 +161,7 @@ Send a message in Discord. You should see:
 | `classifierModel` | `string` | — | OpenClaw `provider/model` ID for LLM classification. **Required for LLM mode.** If not set, uses rule-based keyword matching only. |
 | `imageDir` | `string` | `../assets` | Directory containing emotion image files |
 | `defaultEmotion` | `string` | `"neutral"` | Fallback emotion when no match found |
-| `emotionMap` | `object` | (built-in) | Mapping from emotion name → image filename. **Filenames only** — paths that escape `imageDir` are rejected. |
+| `emotionMap` | `object` | (built-in) | Mapping from emotion name → image filename or labeled image pool. **Filenames only** — paths that escape `imageDir` are rejected. |
 | `emotionRules` | `object` | (built-in) | Custom keyword regex patterns per emotion (merged with defaults) |
 | `onboarding.enabled` | `boolean` | `true` | Enable/disable the onboarding flow |
 | `onboarding.model` | `string` | — | Provider/model for image generation (e.g. `"provider/gpt-5.4"`) |
@@ -247,7 +252,7 @@ Send any of these messages in a channel where the bot is active:
 1. **Character input** — Describe your character in text, attach a reference image, or both.
 2. **Image intent** — If you attached an image, the bot asks: use it as-is for the base, or use it as a style reference to generate a new one?
 3. **Base confirmation** — Review the base character image. Approve, regenerate, or provide feedback (e.g. "make the eyes bigger").
-4. **Emotion loop** — The bot generates each of the 6 emotions one at a time. For each one, you can approve, skip, or give feedback to regenerate.
+4. **Emotion loop** — The bot generates each of the 6 emotions one at a time. For each one, you can approve, skip, give feedback to regenerate, or attach your own image to replace that emotion before approving.
 5. **Done** — All 7 images (base + 6 emotions) are saved to the configured `imageDir`.
 
 ### Commands during onboarding
@@ -257,8 +262,26 @@ Send any of these messages in a channel where the bot is active:
 | `ok` / `good` / `yes` | Approve current image, move to next |
 | `skip` | Save current result as-is, move to next |
 | `retry` / `again` | Regenerate with same settings |
+| Image attachment during an emotion step | Use the uploaded file as the current emotion image |
 | Any other text | Treated as feedback — regenerates with your note applied |
 | `cancel` | Abort onboarding |
+
+### Labeled image pools
+
+`emotionMap` can contain multiple custom images per emotion. Each image may have a `label`, and Hent-ai now prefers variants whose label appears in the bot response context before falling back to weighted random selection:
+
+```jsonc
+{
+  "emotionMap": {
+    "happy": [
+      { "file": "happy-stage.png", "label": "stage", "weight": 2 },
+      { "file": "happy-date-night.png" }
+    ]
+  }
+}
+```
+
+If `label` is omitted, Hent-ai infers one from the filename by removing the emotion word and common image terms. For example, `happy-date-night.png` becomes `date night`, so a response mentioning `date night` will automatically select that image when the classified emotion is `happy`.
 
 ### Config example
 
