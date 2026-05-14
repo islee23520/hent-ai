@@ -1,22 +1,22 @@
-import { writeFile, mkdir } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { generateImage, type GenerateOptions } from "@hent-ai/generate";
 import {
+  EMOTIONS,
   type OnboardingSession,
   OnboardingState,
-  EMOTIONS,
-  SessionManager,
+  type SessionManager,
 } from "./session.js";
-import { parseIntent, parseImageIntent, type UserIntent } from "./parsers.js";
+import { parseImageIntent, parseIntent } from "./parsers.js";
 import { buildBasePrompt, buildEmotionPrompt } from "./prompts.js";
 import {
-  sendTextMessage,
-  sendImageBufferMessage,
+  downloadUrl,
   editTextMessage,
   getMessageAttachments,
-  downloadUrl,
   type Logger,
+  sendImageBufferMessage,
+  sendTextMessage,
 } from "./discord-utils.js";
-import { generateImage, type GenerateOptions } from "@hent-ai/generate";
 
 export interface FlowConfig {
   token: string;
@@ -58,7 +58,7 @@ export async function handleMessage(
       await handleAwaitingBaseConfirm(session, sessions, content, channelId, config);
       break;
     case OnboardingState.AWAITING_EMOTION_CONFIRM:
-      await handleAwaitingEmotionConfirm(session, sessions, content, channelId, config);
+      await handleAwaitingEmotionConfirm(session, sessions, content, messageId, channelId, config);
       break;
     default:
       break;
@@ -213,12 +213,17 @@ async function handleAwaitingEmotionConfirm(
   session: OnboardingSession,
   sessions: SessionManager,
   content: string,
+  messageId: string | undefined,
   channelId: string,
   config: FlowConfig,
 ): Promise<void> {
   const { token, logger, imageDir } = config;
   const intent = parseIntent(content);
   const emotion = EMOTIONS[session.currentEmotionIndex];
+
+  if (await replaceCurrentEmotionWithAttachment(session, emotion, channelId, messageId, config)) {
+    return;
+  }
 
   if (intent.type === "cancel") {
     sessions.delete(session.channelId, session.userId);
@@ -252,7 +257,8 @@ async function handleAwaitingEmotionConfirm(
     if (!session.emotionFeedback[emotion]) {
       session.emotionFeedback[emotion] = [];
     }
-    session.emotionFeedback[emotion]!.push(intent.text);
+    const feedback = session.emotionFeedback[emotion];
+    if (feedback) feedback.push(intent.text);
     await startEmotionGeneration(session, sessions, channelId, config);
     return;
   }
@@ -260,7 +266,7 @@ async function handleAwaitingEmotionConfirm(
 
 async function startBaseGeneration(
   session: OnboardingSession,
-  sessions: SessionManager,
+  _sessions: SessionManager,
   channelId: string,
   config: FlowConfig,
 ): Promise<void> {
@@ -314,7 +320,7 @@ async function startBaseGeneration(
 
 async function startEmotionGeneration(
   session: OnboardingSession,
-  sessions: SessionManager,
+  _sessions: SessionManager,
   channelId: string,
   config: FlowConfig,
 ): Promise<void> {
@@ -352,7 +358,7 @@ async function startEmotionGeneration(
       channelId,
       buffer,
       `${emotion}.png`,
-      `**${emotion}** [${session.currentEmotionIndex + 1}/${EMOTIONS.length}]\n마음에 드나요?\n\n• \"좋아\" → 저장하고 다음으로\n• \"스킵\" → 현재 결과 저장, 다음으로\n• 그 외 텍스트 → 피드백 반영하여 재생성`,
+      `**${emotion}** [${session.currentEmotionIndex + 1}/${EMOTIONS.length}]\n마음에 드나요?\n\n• "좋아" → 저장하고 다음으로\n• "스킵" → 현재 결과 저장, 다음으로\n• 이미지를 첨부 → 이 단계 이미지 직접 업로드\n• 그 외 텍스트 → 피드백 반영하여 재생성`,
       logger,
     );
   } catch (err) {
@@ -366,6 +372,38 @@ async function startEmotionGeneration(
     );
     logger.error(`onboarding: emotion generation failed for ${emotion}: ${err}`);
   }
+}
+
+async function replaceCurrentEmotionWithAttachment(
+  session: OnboardingSession,
+  emotion: string,
+  channelId: string,
+  messageId: string | undefined,
+  config: FlowConfig,
+): Promise<boolean> {
+  if (!messageId) return false;
+
+  const { token, logger } = config;
+  const attachments = await getMessageAttachments(token, channelId, messageId, logger);
+  const imageAttachment = attachments.find(
+    (a) => a.content_type?.startsWith("image/") || /\.(png|jpe?g|webp|gif)$/i.test(a.filename),
+  );
+  if (!imageAttachment) return false;
+
+  const buffer = await downloadUrl(imageAttachment.url, logger);
+  if (!buffer) return false;
+
+  session.currentEmotionBuffer = buffer;
+  session.state = OnboardingState.AWAITING_EMOTION_CONFIRM;
+  await sendImageBufferMessage(
+    token,
+    channelId,
+    buffer,
+    `${emotion}.png`,
+    `업로드한 이미지를 **${emotion}** 이미지로 설정했어요.\n\n• "좋아" → 저장하고 다음으로\n• "다시" → 자동 생성으로 다시 만들기\n• 다른 이미지를 첨부 → 이 단계 이미지를 다시 교체`,
+    logger,
+  );
+  return true;
 }
 
 async function completeOnboarding(
