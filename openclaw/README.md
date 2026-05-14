@@ -243,6 +243,8 @@ The onboarding flow lets users generate emotion images interactively through Dis
 
 While onboarding is active in a channel, Hent-ai pauses its normal thinking/cheer image hook for that user's onboarding messages and tells the user that onboarding mode is active. Every onboarding prompt also reminds the user that they can exit with `취소`, `cancel`, `종료`, or `그만`. Other users and other channels continue using OpenClaw normally.
 
+Each onboarding session stages generated files in an isolated workspace under `imageDir/.onboarding-workspaces/<channel>-<session>`. Files are copied into the shared emotion asset directory only when onboarding completes, and cancelled sessions clean up their temporary workspace.
+
 ### Trigger
 
 Send any of these messages in a channel where the bot is active:

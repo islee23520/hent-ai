@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { registerOnboarding } from "./index.js";
+import { buildOnboardingWorkspaceDir, registerOnboarding } from "./index.js";
 import { getOnboardingSkill, ONBOARDING_EXIT_HINT, ONBOARDING_SKILLS } from "./flow.js";
 import { isTrigger, parseImageIntent, parseIntent } from "./parsers.js";
 import { OnboardingState, SessionManager } from "./session.js";
@@ -99,10 +99,11 @@ describe("SessionManager", () => {
   });
 
   it("creates and retrieves a session", () => {
-    const session = manager.create("ch1", "user1");
+    const session = manager.create("ch1", "user1", "/tmp/workspace-ch1-user1");
     expect(session.state).toBe(OnboardingState.AWAITING_CHARACTER);
     expect(session.channelId).toBe("ch1");
     expect(session.userId).toBe("user1");
+    expect(session.workspaceDir).toBe("/tmp/workspace-ch1-user1");
 
     const retrieved = manager.get("ch1", "user1");
     expect(retrieved).toBe(session);
@@ -113,20 +114,20 @@ describe("SessionManager", () => {
   });
 
   it("deletes a session", () => {
-    manager.create("ch1", "user1");
+    manager.create("ch1", "user1", "/tmp/workspace-ch1-user1");
     manager.delete("ch1", "user1");
     expect(manager.get("ch1", "user1")).toBeNull();
   });
 
   it("getByChannel finds session in channel", () => {
-    const session = manager.create("ch1", "user1");
+    const session = manager.create("ch1", "user1", "/tmp/workspace-ch1-user1");
     expect(manager.getByChannel("ch1")).toBe(session);
     expect(manager.getByChannel("ch2")).toBeNull();
   });
 
   it("expires session after timeout", async () => {
     const shortManager = new SessionManager(50);
-    shortManager.create("ch1", "user1");
+    shortManager.create("ch1", "user1", "/tmp/workspace-ch1-user1");
     await new Promise((r) => setTimeout(r, 60));
     expect(shortManager.get("ch1", "user1")).toBeNull();
     shortManager.destroy();
@@ -134,7 +135,7 @@ describe("SessionManager", () => {
 
   it("touch resets activity timestamp", async () => {
     const shortManager = new SessionManager(100);
-    const session = shortManager.create("ch1", "user1");
+    const session = shortManager.create("ch1", "user1", "/tmp/workspace-ch1-user1");
     await new Promise((r) => setTimeout(r, 60));
     shortManager.touch(session);
     await new Promise((r) => setTimeout(r, 60));
@@ -144,8 +145,8 @@ describe("SessionManager", () => {
 
   it("sweep cleans expired sessions", async () => {
     const shortManager = new SessionManager(50);
-    shortManager.create("ch1", "user1");
-    shortManager.create("ch2", "user2");
+    shortManager.create("ch1", "user1", "/tmp/workspace-ch1-user1");
+    shortManager.create("ch2", "user2", "/tmp/workspace-ch2-user2");
     await new Promise((r) => setTimeout(r, 60));
     expect(shortManager.get("ch1", "user1")).toBeNull();
     expect(shortManager.get("ch2", "user2")).toBeNull();
@@ -182,6 +183,19 @@ describe("onboarding skills", () => {
 });
 
 describe("onboarding runtime", () => {
+  it("builds isolated workspace directories per channel and user", () => {
+    const first = buildOnboardingWorkspaceDir("/tmp/assets", "channel:123", "user/one");
+    const second = buildOnboardingWorkspaceDir("/tmp/assets", "channel:456", "user/one");
+    const sessionScoped = buildOnboardingWorkspaceDir("/tmp/assets", "channel:123", "session:key/one");
+
+    expect(first).toContain(".onboarding-workspaces");
+    expect(first).not.toBe(second);
+    expect(first).not.toBe(sessionScoped);
+    expect(first).not.toContain("channel:123");
+    expect(first).not.toContain("user/one");
+    expect(sessionScoped).not.toContain("session:key/one");
+  });
+
   it("exposes the accepted exit commands in the shared hint", () => {
     expect(ONBOARDING_EXIT_HINT).toContain("취소");
     expect(ONBOARDING_EXIT_HINT).toContain("cancel");
@@ -211,6 +225,29 @@ describe("onboarding runtime", () => {
 
     expect(runtime?.isOnboardingMessage("123", "user1", "cute cat")).toBe(true);
     expect(runtime?.isOnboardingMessage("123", "user2", "cute cat")).toBe(false);
+  });
+
+  it("uses OpenClaw session keys for onboarding isolation when available", async () => {
+    const handlers: Array<(event: unknown, ctx: unknown) => Promise<void>> = [];
+    const runtime = registerOnboarding(
+      {
+        on: (_event, handler) => handlers.push(handler),
+        logger: { info: () => {}, warn: () => {}, error: () => {} },
+      },
+      "token",
+      "/tmp/hent-ai-test-assets",
+      {},
+    );
+
+    await handlers[0]?.({
+      content: "onboarding",
+      senderId: "same-user",
+      sessionKey: "agent-session-a",
+      metadata: { to: "channel:123", messageId: "msg1" },
+    }, {});
+
+    expect(runtime?.isOnboardingMessage("123", "same-user", "cute cat", "agent-session-a")).toBe(true);
+    expect(runtime?.isOnboardingMessage("123", "same-user", "cute cat", "agent-session-b")).toBe(false);
   });
 
   it("returns null when onboarding is disabled", () => {

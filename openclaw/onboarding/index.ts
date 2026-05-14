@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import { SessionManager, OnboardingState } from "./session.js";
 import { isTrigger } from "./parsers.js";
 import { handleMessage, ONBOARDING_EXIT_HINT, type FlowConfig } from "./flow.js";
@@ -13,7 +14,19 @@ export interface OnboardingConfig {
 }
 
 export interface OnboardingRuntime {
-  isOnboardingMessage: (channelId: string, userId: string, content: string) => boolean;
+  isOnboardingMessage: (channelId: string, userId: string, content: string, sessionKey?: string) => boolean;
+}
+
+function sanitizeWorkspaceSegment(value: string): string {
+  return value.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 80) || "unknown";
+}
+
+export function buildOnboardingWorkspaceDir(imageDir: string, channelId: string, scopeId: string): string {
+  return resolve(
+    imageDir,
+    ".onboarding-workspaces",
+    `${sanitizeWorkspaceSegment(channelId)}-${sanitizeWorkspaceSegment(scopeId)}`,
+  );
 }
 
 export interface PluginApi {
@@ -45,19 +58,21 @@ export function registerOnboarding(
   };
 
   const runtime: OnboardingRuntime = {
-    isOnboardingMessage: (channelId, userId, content) => {
+    isOnboardingMessage: (channelId, userId, content, sessionKey) => {
       const trimmed = content.trim();
       if (isTrigger(trimmed)) return true;
-      return sessions.get(channelId, userId) !== null;
+      return sessions.get(channelId, sessionKey ?? userId) !== null;
     },
   };
 
   api.on(
     "message_received",
     async (event) => {
-      const { content, metadata } = event as {
+      const { content, metadata, senderId, sessionKey } = event as {
         content?: string;
         metadata?: Record<string, unknown>;
+        senderId?: string;
+        sessionKey?: string;
       };
 
       if (!content) return;
@@ -67,13 +82,14 @@ export function registerOnboarding(
       const channelId = rawTo.startsWith("channel:") ? rawTo.slice(8) : rawTo;
       if (!channelId || !/^\d+$/.test(channelId)) return;
 
-      const userId = (metadata?.from as string) ?? "unknown";
+      const userId = senderId ?? (metadata?.from as string) ?? "unknown";
+      const sessionScope = sessionKey ?? userId;
       const messageId = metadata?.messageId as string | undefined;
       const trimmed = content.trim();
 
       if (isTrigger(trimmed)) {
         const existing = sessions.getByChannel(channelId);
-        if (existing && existing.userId !== userId) {
+        if (existing && existing.userId !== sessionScope) {
           await sendTextMessage(
             botToken,
             channelId,
@@ -83,7 +99,7 @@ export function registerOnboarding(
           return;
         }
 
-        if (existing && existing.userId === userId) {
+        if (existing && existing.userId === sessionScope) {
           await sendTextMessage(
             botToken,
             channelId,
@@ -107,13 +123,16 @@ export function registerOnboarding(
           return;
         }
 
-        sessions.create(channelId, userId);
+        const workspaceDir = buildOnboardingWorkspaceDir(imageDir, channelId, sessionScope);
+        sessions.create(channelId, sessionScope, workspaceDir);
         await sendTextMessage(
           botToken,
           channelId,
           "🎨 Hent-ai 온보딩을 시작합니다!\n\n" +
             "지금부터 이 채널의 내 온보딩 메시지는 온보딩 모드에서만 처리돼요.\n" +
             "일반 자동 thinking/cheer 이미지는 잠시 멈추고, 다른 사용자나 다른 채널은 평소처럼 동작합니다.\n\n" +
+            `내 온보딩 작업공간: ${workspaceDir}\n` +
+            "완료 전까지는 이 작업공간에 임시 저장되고, 완료 시 emotion assets에 반영됩니다.\n\n" +
             "캐릭터를 설명해주세요.\n" +
             "예: \"cute orange cat\", \"pixel art robot\", \"anime girl with blue hair\"\n\n" +
             "이미지를 첨부하면:\n" +
@@ -125,7 +144,7 @@ export function registerOnboarding(
         return;
       }
 
-      const session = sessions.get(channelId, userId);
+      const session = sessions.get(channelId, sessionScope);
       if (!session) return;
       if (session.state === OnboardingState.COMPLETED) return;
 

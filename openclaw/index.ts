@@ -1078,7 +1078,12 @@ export default definePluginEntry({
 
       if (cheerEnabled || (thinkingImagePath && existsSync(thinkingImagePath))) {
        api.on("message_received", async (event) => {
-         const { content, metadata } = event as { content?: string; metadata?: Record<string, unknown> };
+         const { content, metadata, senderId, sessionKey } = event as {
+           content?: string;
+           metadata?: Record<string, unknown>;
+           senderId?: string;
+           sessionKey?: string;
+         };
          if (!content || content.trim() === "NO_REPLY") return;
 
         // Extract Discord channel snowflake from metadata.to ("channel:ID" format)
@@ -1086,8 +1091,8 @@ export default definePluginEntry({
         if (!rawTo) return;
           const discordChannelId = rawTo.startsWith("channel:") ? rawTo.slice(8) : rawTo;
           if (!discordChannelId || !/^\d+$/.test(discordChannelId)) return;
-          const userId = (metadata?.from as string | undefined) ?? "unknown";
-          if (onboardingRuntime?.isOnboardingMessage(discordChannelId, userId, content)) return;
+          const userId = senderId ?? (metadata?.from as string | undefined) ?? "unknown";
+          if (onboardingRuntime?.isOnboardingMessage(discordChannelId, userId, content, sessionKey)) return;
 
           if (
            cheerEnabled &&
