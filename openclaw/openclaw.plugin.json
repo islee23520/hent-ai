@@ -39,11 +39,40 @@
       },
        "classifierModel": {
          "type": "string",
-         "description": "OpenClaw provider/model ID for LLM-based emotion classification (e.g. 'closedrouter-openai/gpt-4o-mini'). If not set, falls back to rule-based keyword matching."
+         "description": "OpenClaw provider/model ID for LLM-based emotion classification (e.g. 'your-provider/gpt-5.4-mini'). If not set, falls back to rule-based keyword matching."
        },
        "discordToken": {
          "type": "string",
          "description": "Discord bot token. Supports literal token or '${ENV_VAR}' placeholder (e.g. '${EMOTION_IMAGE_DISCORD_TOKEN}'). The env var EMOTION_IMAGE_DISCORD_TOKEN also works directly. Required for the plugin to attach images."
+       },
+       "cheer": {
+         "type": "object",
+         "description": "Generate a one-off encouragement image when the user's message expresses a cheer/support request intent.",
+         "additionalProperties": false,
+         "properties": {
+           "enabled": {
+             "type": "boolean",
+             "description": "Enable cheer request image generation.",
+             "default": true
+           },
+           "character": {
+             "type": "string",
+             "description": "Optional character description for cheer images. If omitted, base.png is used as reference when available."
+           },
+           "intentModel": {
+             "type": "string",
+             "description": "Optional provider/model ID for detecting cheer/support request intent (e.g. 'your-provider/gpt-5.4-mini'). Defaults to classifierModel."
+           },
+           "model": {
+             "type": "string",
+             "description": "Optional provider/model ID for cheer image generation. Defaults to onboarding.model."
+           },
+           "size": {
+             "type": "string",
+             "description": "Generated cheer image size.",
+             "default": "1024x1024"
+           }
+         }
        }
     }
   }

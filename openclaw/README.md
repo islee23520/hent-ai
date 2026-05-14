@@ -98,7 +98,7 @@ Add the plugin configuration to your `openclaw.json` (or via `openclaw config`):
            "discordToken": "${EMOTION_IMAGE_DISCORD_TOKEN}",
 
            // Required: provider/model ID for LLM-based emotion classification
-           "classifierModel": "your-provider/your-model-id",
+           "classifierModel": "your-provider/gpt-5.4-mini",
 
            // Optional: custom image directory (defaults to ../assets/ relative to the plugin)
            // "imageDir": "/path/to/custom/assets",
@@ -138,7 +138,7 @@ openclaw gateway restart
 After restart, check the gateway log for:
 
 ```
-[plugins] emotion-image: LLM classifier enabled with model="your-provider/your-model-id"
+[plugins] emotion-image: LLM classifier enabled with model="your-provider/gpt-5.4-mini"
 [plugins] emotion-image: token found (len=XX), imageDir=/path/to/assets
 ```
 
@@ -163,14 +163,21 @@ Send a message in Discord. You should see:
 | `onboarding.size` | `string` | `"1024x1024"` | Generated image dimensions |
 | `onboarding.sessionTimeoutMs` | `number` | `1800000` | Session timeout in ms (default: 30 min) |
 | `onboarding.allowedUsers` | `string[]` | `[]` | User IDs allowed to run onboarding (empty = everyone) |
+| `cheer.enabled` | `boolean` | `true` | Enable one-off cheer image generation |
+| `cheer.intentModel` | `string` | `classifierModel` | Optional provider/model ID for detecting cheer/support request intent |
+| `cheer.character` | `string` | — | Optional character description for cheer images; otherwise `base.png` is used as reference when available |
+| `cheer.model` | `string` | `onboarding.model` | Optional provider/model ID for cheer image generation |
+| `cheer.size` | `string` | `onboarding.size` or `"1024x1024"` | Generated cheer image dimensions |
 
 ## How It Works
 
 Hent-ai operates in two phases:
 
 1. **Phase 1 — Thinking Indicator** (`message_received` hook)
-   - When a user sends a message, the plugin immediately sends a "focused" (thinking) image to the channel
-   - This gives instant visual feedback before the bot responds
+    - When a user sends a message, the plugin immediately sends a "focused" (thinking) image to the channel
+    - This gives instant visual feedback before the bot responds
+    - If the user's message asks for encouragement/support (for example `나 응원해줘` or `오늘 너무 힘든데 기운 좀 줘`), the plugin generates and sends a tasteful non-explicit cheer image instead
+    - Cheer intent detection requires `classifierModel` or `cheer.intentModel`; without a configured GPT/provider model, cheer requests will not trigger image generation
 
 2. **Phase 2 — Emotion Classification** (`message_sent` hook)
    - After the bot sends a response, the plugin calls an LLM to classify the emotion of the response text
@@ -183,7 +190,8 @@ Hent-ai operates in two phases:
 User message
   │
   ├─► [message_received hook]
-  │     └─► Send focused.png to channel (instant)
+  │     ├─► If LLM detects cheer/support intent: generate + send cheer.png-style support image
+  │     └─► Otherwise send focused.png to channel (instant)
   │
   ▼
 Bot generates response
