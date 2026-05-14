@@ -1,9 +1,11 @@
-import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
-import { resolve, dirname, sep, isAbsolute } from "node:path";
-import { fileURLToPath } from "node:url";
-import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { dirname, isAbsolute, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
+import { generateImage, type GenerateOptions } from "@hent-ai/generate";
+import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { registerOnboarding, type OnboardingConfig } from "./onboarding/index.js";
+import { sendImageBufferMessage, sendTextMessage } from "./onboarding/discord-utils.js";
 
 const LLM_TIMEOUT_MS = 15_000;
 
@@ -188,6 +190,170 @@ async function classifyEmotionViaAnthropic(
   return emotion;
 }
 
+async function classifyCheerIntentViaOpenAI(
+  baseUrl: string,
+  apiKey: string,
+  modelId: string,
+  text: string,
+  signal: AbortSignal,
+  logger: { warn: (...args: any[]) => void },
+): Promise<boolean | null> {
+  const url = `${baseUrl.replace(/\/+$/, "")}/chat/completions`;
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+      "User-Agent": "OpenClaw-EmotionImage/1.0",
+    },
+    body: JSON.stringify({
+      model: modelId,
+      messages: [
+        {
+          role: "user",
+          content: buildCheerIntentPrompt(text),
+        },
+      ],
+      max_tokens: 10,
+      temperature: 0,
+    }),
+    signal,
+  });
+
+  if (!response.ok) {
+    const body = await response.text().catch(() => "(no body)");
+    logger.warn(`emotion-image: OpenAI cheer intent returned ${response.status} from ${url}: ${body.slice(0, 500)}`);
+    return null;
+  }
+
+  const data = (await response.json()) as {
+    choices?: Array<{ message?: { content?: string } }>;
+  };
+  const content = data?.choices?.[0]?.message?.content;
+  const intent = extractBooleanIntent(content);
+  if (intent === null) {
+    logger.warn(`emotion-image: OpenAI cheer intent parse failed, raw="${content ?? "(no content)"}"`);
+  }
+  return intent;
+}
+
+async function classifyCheerIntentViaAnthropic(
+  baseUrl: string,
+  apiKey: string,
+  modelId: string,
+  text: string,
+  signal: AbortSignal,
+  logger: { warn: (...args: any[]) => void },
+): Promise<boolean | null> {
+  const url = `${baseUrl.replace(/\/+$/, "")}/messages`;
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "User-Agent": "OpenClaw-EmotionImage/1.0",
+    },
+    body: JSON.stringify({
+      model: modelId,
+      max_tokens: 10,
+      temperature: 0,
+      messages: [
+        {
+          role: "user",
+          content: buildCheerIntentPrompt(text),
+        },
+      ],
+    }),
+    signal,
+  });
+
+  if (!response.ok) {
+    const body = await response.text().catch(() => "(no body)");
+    logger.warn(`emotion-image: Anthropic cheer intent returned ${response.status} from ${url}: ${body.slice(0, 500)}`);
+    return null;
+  }
+
+  const data = (await response.json()) as {
+    content?: Array<{ text?: string }>;
+  };
+  const content = data?.content?.[0]?.text;
+  const intent = extractBooleanIntent(content);
+  if (intent === null) {
+    logger.warn(`emotion-image: Anthropic cheer intent parse failed, raw="${content ?? "(no content)"}"`);
+  }
+  return intent;
+}
+
+export async function detectCheerIntentWithLLM(
+  classifierModel: string,
+  text: string,
+  runtime: {
+    config: {
+      current: () => { models?: { providers?: Record<string, { baseUrl?: string; api?: string }> } };
+    };
+    modelAuth: {
+      resolveApiKeyForProvider: (params: {
+        provider: string;
+        cfg?: unknown;
+      }) => Promise<{ apiKey?: string }>;
+    };
+  },
+  logger: { warn: (...args: any[]) => void },
+): Promise<boolean> {
+  const slashIdx = classifierModel.indexOf("/");
+  if (slashIdx === -1) {
+    logger.warn(`emotion-image: cheer intent model "${classifierModel}" missing "/" separator`);
+    return false;
+  }
+  const providerName = classifierModel.slice(0, slashIdx);
+  const modelId = classifierModel.slice(slashIdx + 1);
+  if (!providerName || !modelId) {
+    logger.warn(`emotion-image: cheer intent model "${classifierModel}" could not be parsed`);
+    return false;
+  }
+
+  const cfg = runtime.config.current();
+  const providerCfg = cfg.models?.providers?.[providerName];
+  if (!providerCfg?.baseUrl) {
+    logger.warn(`emotion-image: cheer intent provider "${providerName}" not found or missing baseUrl in config`);
+    return false;
+  }
+
+  let apiKey: string | undefined;
+  try {
+    const auth = await runtime.modelAuth.resolveApiKeyForProvider({
+      provider: providerName,
+      cfg: providerCfg,
+    });
+    apiKey = auth.apiKey;
+  } catch (err) {
+    logger.warn(`emotion-image: failed to resolve cheer intent apiKey for "${providerName}": ${err}`);
+    return false;
+  }
+
+  if (!apiKey) {
+    logger.warn(`emotion-image: no cheer intent apiKey resolved for provider "${providerName}"`);
+    return false;
+  }
+
+  const baseUrl = providerCfg.baseUrl.replace(/\/+$/, "");
+  const apiType: ApiType = detectApiType(providerCfg.api);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), LLM_TIMEOUT_MS);
+  try {
+    const result = apiType === "anthropic-messages"
+      ? await classifyCheerIntentViaAnthropic(baseUrl, apiKey, modelId, text, controller.signal, logger)
+      : await classifyCheerIntentViaOpenAI(baseUrl, apiKey, modelId, text, controller.signal, logger);
+    return result ?? false;
+  } catch (err) {
+    logger.warn(`emotion-image: cheer intent LLM call error: ${err}`);
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * Emotion Image Plugin v3
  *
@@ -245,6 +411,62 @@ const EMOTION_RULES: Array<{ emotion: string; patterns: RegExp[] }> = [
 ];
 
 const DEFAULT_EMOTION = "neutral";
+
+export interface CheerConfig {
+  enabled?: boolean;
+  character?: string;
+  intentModel?: string;
+  model?: string;
+  size?: string;
+}
+
+export function buildCheerPrompt(character?: string): string {
+  const subject = character?.trim()
+    ? `Character: ${character.trim()}.`
+    : "Character: use the same character as the reference image if provided; otherwise create a charming original Hent-ai mascot.";
+
+  return [
+    "Create a polished single-scene 2D anime illustration for cheering up the user.",
+    subject,
+    "Scene: the character warmly cheers for the viewer with an energetic pose, bright smile, direct eye contact, supportive body language, and celebratory props such as glow sticks, pom-poms, ribbons, or a small encouragement banner reading \"화이팅!\".",
+    "Mood: uplifting, affectionate, playful fanservice energy, confidence boost, personal support from the character to the user.",
+    "Style: modern Japanese visual novel CG art, bishoujo dating sim game illustration, high-quality 2D anime game CG, hand-drawn anime illustration, clean thin lineart, refined cel shading, soft ambient lighting, expressive glossy anime eyes, delicate facial features, cinematic composition.",
+    "Safety requirements: tasteful and non-explicit, fully clothed, no nudity, no lingerie, no sexual act, no fetish focus, no minors, no suggestive camera angle, no exposed underwear, no erotic text.",
+    "Format requirements: single coherent illustration, square format, no panels, no character sheet, no turnaround views, no text other than the short Korean cheer banner if included.",
+  ].join(" ");
+}
+
+function pngBufferToDataUrl(buffer: Buffer): string {
+  return `data:image/png;base64,${buffer.toString("base64")}`;
+}
+
+function extractBooleanIntent(content: string | undefined | null): boolean | null {
+  if (!content) return null;
+
+  const normalized = content.trim().toLowerCase();
+  if (!normalized) return null;
+
+  if (["yes", "true", "y"].includes(normalized)) return true;
+  if (["no", "false", "n"].includes(normalized)) return false;
+
+  const unquoted = normalized.replace(/^(["'`\u2018\u2019\u201c\u201d]+)|(["'`\u2018\u2019\u201c\u201d]+)$/g, "").trim();
+  if (["yes", "true", "y"].includes(unquoted)) return true;
+  if (["no", "false", "n"].includes(unquoted)) return false;
+
+  const match = /\b(yes|true|no|false)\b/i.exec(unquoted);
+  if (!match) return null;
+  return match[1].toLowerCase() === "yes" || match[1].toLowerCase() === "true";
+}
+
+function buildCheerIntentPrompt(text: string): string {
+  return [
+    "Decide whether the user's message is asking the character/bot to encourage, cheer up, comfort, support, motivate, or give emotional energy to the user.",
+    "Return ONLY yes or no.",
+    "Answer yes for indirect requests like being tired and wanting energy, wanting support, asking for encouragement, or asking the character to root for them.",
+    "Answer no for thanks, normal greetings, status updates, or unrelated mentions of cheering.",
+    `Message: ${text}`,
+  ].join("\n");
+}
 
 /**
  * Attempt LLM-based emotion classification via the configured provider/model.
@@ -460,6 +682,56 @@ export async function sendImageMessage(
   }
 }
 
+export async function handleCheerRequest(
+  params: {
+    token: string;
+    channelId: string;
+    imageDir: string;
+    config: CheerConfig;
+    onboardingConfig?: OnboardingConfig;
+    logger: { info: (...args: any[]) => void; warn: (...args: any[]) => void; error: (...args: any[]) => void };
+  },
+): Promise<void> {
+  const { token, channelId, imageDir, config, onboardingConfig, logger } = params;
+  const baseImagePath = assertPathInside(imageDir, "base.png");
+  await sendTextMessage(
+    token,
+    channelId,
+    "응원 이미지를 만들고 있어요. 잠깐만 기다려주세요!",
+    logger,
+  );
+
+  try {
+    const options: GenerateOptions = {
+      prompt: buildCheerPrompt(config.character),
+      model: config.model ?? onboardingConfig?.model,
+      size: config.size ?? onboardingConfig?.size ?? "1024x1024",
+      referenceImages:
+        baseImagePath && existsSync(baseImagePath)
+          ? [pngBufferToDataUrl(await readFile(baseImagePath))]
+          : undefined,
+    };
+    const buffer = await generateImage(options);
+    await sendImageBufferMessage(
+      token,
+      channelId,
+      buffer,
+      "cheer.png",
+      "화이팅! 오늘도 충분히 잘하고 있어요.",
+      logger,
+    );
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    await sendTextMessage(
+      token,
+      channelId,
+      `응원 이미지 생성에 실패했어요: ${errMsg}`,
+      logger,
+    );
+    logger.error(`emotion-image: cheer generation failed: ${err}`);
+  }
+}
+
 export async function appendImageToMessage(
   token: string,
   channelId: string,
@@ -629,7 +901,7 @@ export function buildEmotionRules(
   return Object.entries(merged).map(([emotion, patterns]) => ({ emotion, patterns }));
 }
 
-export { detectEmotionWithLLM, extractEmotion };
+export { detectEmotionWithLLM, extractBooleanIntent, extractEmotion };
 export default definePluginEntry({
   id: "emotion-image",
   name: "Emotion Image Attachment",
@@ -645,6 +917,7 @@ export default definePluginEntry({
       classifierModel?: string;
       discordToken?: string;
       onboarding?: OnboardingConfig;
+      cheer?: CheerConfig;
     };
 
     if (pluginConfig.enabled === false) return;
@@ -696,24 +969,46 @@ export default definePluginEntry({
 
     registerOnboarding(api, botToken, imageDir, pluginConfig.onboarding ?? {});
 
-     // Phase 1: On user message received, immediately send focused (thinking) image
-     const thinkingFilename = emotionMap["focused"] ?? "focused.png";
-     const thinkingImagePath = assertPathInside(imageDir, thinkingFilename);
+      const cheerConfig = pluginConfig.cheer ?? {};
+      const cheerEnabled = cheerConfig.enabled !== false;
+      const cheerIntentModel = cheerConfig.intentModel ?? classifierModel;
 
-     if (thinkingImagePath && existsSync(thinkingImagePath)) {
-      api.on("message_received", async (event, ctx) => {
-        const { content, metadata } = event as { content?: string; metadata?: Record<string, unknown> };
-        if (!content || content.trim() === "NO_REPLY") return;
+      // Phase 1: On user message received, immediately send focused (thinking) image
+      const thinkingFilename = emotionMap.focused ?? "focused.png";
+      const thinkingImagePath = assertPathInside(imageDir, thinkingFilename);
+
+      if (cheerEnabled || (thinkingImagePath && existsSync(thinkingImagePath))) {
+       api.on("message_received", async (event) => {
+         const { content, metadata } = event as { content?: string; metadata?: Record<string, unknown> };
+         if (!content || content.trim() === "NO_REPLY") return;
 
         // Extract Discord channel snowflake from metadata.to ("channel:ID" format)
         const rawTo = metadata?.to as string | undefined;
         if (!rawTo) return;
-        const discordChannelId = rawTo.startsWith("channel:") ? rawTo.slice(8) : rawTo;
-        if (!discordChannelId || !/^\d+$/.test(discordChannelId)) return;
+         const discordChannelId = rawTo.startsWith("channel:") ? rawTo.slice(8) : rawTo;
+         if (!discordChannelId || !/^\d+$/.test(discordChannelId)) return;
 
-        api.logger.info(`emotion-image: received user msg, sending thinking image to channel=${discordChannelId}`);
-        try {
-          await sendImageMessage(botToken!, discordChannelId, thinkingImagePath, api.logger);
+         if (
+           cheerEnabled &&
+           cheerIntentModel &&
+           await detectCheerIntentWithLLM(cheerIntentModel, content, api.runtime, api.logger)
+         ) {
+           await handleCheerRequest({
+              token: botToken,
+             channelId: discordChannelId,
+             imageDir,
+             config: cheerConfig,
+             onboardingConfig: pluginConfig.onboarding,
+             logger: api.logger,
+           });
+           return;
+         }
+
+         if (!thinkingImagePath || !existsSync(thinkingImagePath)) return;
+
+         api.logger.info(`emotion-image: received user msg, sending thinking image to channel=${discordChannelId}`);
+         try {
+            await sendImageMessage(botToken, discordChannelId, thinkingImagePath, api.logger);
         } catch (err) {
           api.logger.warn(`emotion-image: thinking image send failed: ${err}`);
         }
@@ -723,7 +1018,7 @@ export default definePluginEntry({
      const channelQueues = new Map<string, Promise<void>>();
 
      // Phase 2: On bot message sent, LLM classifies emotion and appends image
-     api.on("message_sent", async (event, ctx) => {
+     api.on("message_sent", async (event) => {
       const {
         to,
         content,
@@ -783,7 +1078,7 @@ export default definePluginEntry({
          }
 
          api.logger.info(`emotion-image: appending ${finalEmotion} image for msg=${messageId}`);
-         await appendImageToMessage(botToken!, channelId, messageId, finalImagePath, api.logger);
+          await appendImageToMessage(botToken, channelId, messageId, finalImagePath, api.logger);
        };
 
        const prev = channelQueues.get(channelId) ?? Promise.resolve();

@@ -1,15 +1,58 @@
-import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { generateImage } from "@hent-ai/generate";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-   detectEmotion,
-   MEDIA_LINE_RE,
-   editMessageWithImage,
-   buildEmotionRules,
-   detectEmotionWithLLM,
-   detectApiType,
-   extractEmotion,
-   assertPathInside,
-   expandEnvPlaceholder,
- } from "./index.js";
+  assertPathInside,
+  buildCheerPrompt,
+  buildEmotionRules,
+  detectCheerIntentWithLLM,
+  detectApiType,
+  detectEmotion,
+  detectEmotionWithLLM,
+  editMessageWithImage,
+  expandEnvPlaceholder,
+  extractBooleanIntent,
+  extractEmotion,
+  handleCheerRequest,
+  MEDIA_LINE_RE,
+} from "./index.js";
+
+vi.mock("@hent-ai/generate", () => ({
+  generateImage: vi.fn(async () => Buffer.from("FAKE_CHEER_PNG")),
+}));
+
+function mockRuntime(overrides?: {
+  baseUrl?: string;
+  api?: string;
+  resolveApiKeyError?: boolean;
+  noApiKey?: boolean;
+}) {
+  const baseUrl = overrides?.baseUrl ?? "https://api.openai.com/v1";
+  const api = overrides?.api ?? "openai-completions";
+
+  let resolveApiKeyFn: ReturnType<typeof vi.fn>;
+  if (overrides?.resolveApiKeyError) {
+    resolveApiKeyFn = vi.fn().mockRejectedValue(new Error("auth error"));
+  } else if (overrides?.noApiKey) {
+    resolveApiKeyFn = vi.fn().mockResolvedValue({ apiKey: undefined });
+  } else {
+    resolveApiKeyFn = vi.fn().mockResolvedValue({ apiKey: "sk-test-key" });
+  }
+
+  return {
+    config: {
+      current: () => ({
+        models: {
+          providers: {
+            openai: { baseUrl, api },
+          },
+        },
+      }),
+    },
+    modelAuth: {
+      resolveApiKeyForProvider: resolveApiKeyFn,
+    },
+  };
+}
 
 describe("detectEmotion", () => {
   it("returns 'happy' when text contains completion keywords", () => {
@@ -81,6 +124,95 @@ describe("MEDIA_LINE_RE", () => {
   });
 });
 
+describe("cheer request helpers", () => {
+  it("parses positive binary intent responses", () => {
+    expect(extractBooleanIntent("yes")).toBe(true);
+    expect(extractBooleanIntent("TRUE")).toBe(true);
+    expect(extractBooleanIntent('"yes"')).toBe(true);
+    expect(extractBooleanIntent("Intent: yes")).toBe(true);
+  });
+
+  it("parses negative and invalid binary intent responses conservatively", () => {
+    expect(extractBooleanIntent("no")).toBe(false);
+    expect(extractBooleanIntent("FALSE")).toBe(false);
+    expect(extractBooleanIntent("maybe")).toBeNull();
+  });
+
+  it("builds a safe non-explicit cheer image prompt", () => {
+    const prompt = buildCheerPrompt("orange cat idol");
+    expect(prompt).toContain("orange cat idol");
+    expect(prompt).toContain("화이팅");
+    expect(prompt).toContain("fully clothed");
+    expect(prompt).toContain("no nudity");
+  });
+
+  it("generates and sends a cheer image through the Discord surface", async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ id: "msg-1" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await handleCheerRequest({
+      token: "token",
+      channelId: "123456789",
+      imageDir: "/tmp/no-base-image",
+      config: { character: "orange cat idol", size: "512x512" },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    });
+
+    expect(generateImage).toHaveBeenCalledWith({
+      prompt: buildCheerPrompt("orange cat idol"),
+      model: undefined,
+      size: "512x512",
+      referenceImages: undefined,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[0][1].body).toContain("응원 이미지를 만들고 있어요");
+    expect(Buffer.isBuffer(fetchMock.mock.calls[1][1].body)).toBe(true);
+    expect(fetchMock.mock.calls[1][1].body.toString()).toContain("cheer.png");
+    expect(fetchMock.mock.calls[1][1].body.toString()).toContain("화이팅! 오늘도 충분히 잘하고 있어요.");
+  });
+
+  it("detects indirect Korean cheer intent with the configured LLM", async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ choices: [{ message: { content: "yes" } }] }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await detectCheerIntentWithLLM(
+      "openai/gpt-5.4-mini",
+      "오늘 너무 지쳤는데 기운 좀 줄 수 있어?",
+      mockRuntime() as never,
+      { warn: vi.fn() },
+    );
+
+    expect(result).toBe(true);
+    const [, options] = fetchMock.mock.calls[0];
+    const body = JSON.parse(options.body);
+    expect(body.messages[0].content).toContain("encourage, cheer up, comfort, support, motivate");
+    expect(body.messages[0].content).toContain("오늘 너무 지쳤는데 기운 좀 줄 수 있어?");
+  });
+
+  it("does not detect non-cheer intent when the configured LLM says no", async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ choices: [{ message: { content: "no" } }] }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await detectCheerIntentWithLLM(
+      "openai/gpt-5.4-mini",
+      "응원 고마워, 그런데 설정 방법 알려줘",
+      mockRuntime() as never,
+      { warn: vi.fn() },
+    );
+
+    expect(result).toBe(false);
+  });
+});
+
 describe("channel: prefix strip", () => {
   it("strips channel: prefix from channel ID", () => {
     const to = "channel:123456789";
@@ -106,8 +238,8 @@ describe("buildEmotionRules", () => {
   it("merges custom keywords into existing emotion", () => {
     const custom = { happy: ["\\b(perfect|excellent)\\b"] };
     const rules = buildEmotionRules(custom);
-    const happyRule = rules.find((r) => r.emotion === "happy")!;
-    expect(happyRule.patterns.length).toBeGreaterThanOrEqual(3);
+    const happyRule = rules.find((r) => r.emotion === "happy");
+    expect(happyRule?.patterns.length).toBeGreaterThanOrEqual(3);
   });
 
   it("creates new emotion from custom rules", () => {
@@ -343,40 +475,6 @@ describe("detectEmotionWithLLM", () => {
   const mockLogger = { warn: vi.fn() };
   const validEmotions = ["happy", "neutral", "sorry"];
 
-  function mockRuntime(overrides?: {
-    baseUrl?: string;
-    api?: string;
-    resolveApiKeyError?: boolean;
-    noApiKey?: boolean;
-  }) {
-    const baseUrl = overrides?.baseUrl ?? "https://api.openai.com/v1";
-    const api = overrides?.api ?? "openai-completions";
-
-    let resolveApiKeyFn: ReturnType<typeof vi.fn>;
-    if (overrides?.resolveApiKeyError) {
-      resolveApiKeyFn = vi.fn().mockRejectedValue(new Error("auth error"));
-    } else if (overrides?.noApiKey) {
-      resolveApiKeyFn = vi.fn().mockResolvedValue({ apiKey: undefined });
-    } else {
-      resolveApiKeyFn = vi.fn().mockResolvedValue({ apiKey: "sk-test-key" });
-    }
-
-    return {
-      config: {
-        current: () => ({
-          models: {
-            providers: {
-              "openai": { baseUrl, api },
-            },
-          },
-        }),
-      },
-      modelAuth: {
-        resolveApiKeyForProvider: resolveApiKeyFn,
-      },
-    };
-  }
-
   let mockFetch: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
@@ -399,7 +497,7 @@ describe("detectEmotionWithLLM", () => {
 
     const runtime = mockRuntime();
     const result = await detectEmotionWithLLM(
-      "openai/gpt-4o-mini",
+      "openai/gpt-5.4-mini",
       "This is great!",
       validEmotions,
       runtime as never,
@@ -473,7 +571,7 @@ describe("detectEmotionWithLLM", () => {
     };
 
     const result = await detectEmotionWithLLM(
-      "openai/gpt-4o-mini",
+      "openai/gpt-5.4-mini",
       "test",
       validEmotions,
       runtime as never,
@@ -489,7 +587,7 @@ describe("detectEmotionWithLLM", () => {
   it("returns null when auth throws", async () => {
     const runtime = mockRuntime({ resolveApiKeyError: true });
     const result = await detectEmotionWithLLM(
-      "openai/gpt-4o-mini",
+      "openai/gpt-5.4-mini",
       "test",
       validEmotions,
       runtime as never,
@@ -512,7 +610,7 @@ describe("detectEmotionWithLLM", () => {
 
     const runtime = mockRuntime();
     const result = await detectEmotionWithLLM(
-      "openai/gpt-4o-mini",
+      "openai/gpt-5.4-mini",
       "test",
       validEmotions,
       runtime as never,
@@ -527,7 +625,7 @@ describe("detectEmotionWithLLM", () => {
 
     const runtime = mockRuntime();
     const result = await detectEmotionWithLLM(
-      "openai/gpt-4o-mini",
+      "openai/gpt-5.4-mini",
       "test",
       validEmotions,
       runtime as never,
@@ -549,7 +647,7 @@ describe("detectEmotionWithLLM", () => {
 
     const runtime = mockRuntime();
     const result = await detectEmotionWithLLM(
-      "openai/gpt-4o-mini",
+      "openai/gpt-5.4-mini",
       "test",
       validEmotions,
       runtime as never,
