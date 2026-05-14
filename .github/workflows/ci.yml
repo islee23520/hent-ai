@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  openclaw:
+    name: OpenClaw Plugin
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: openclaw
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Strip OpenClaw SDK dependencies (not published to npm)
+        run: node -e "
+          const fs = require('fs');
+          const pkg = JSON.parse(fs.readFileSync('package.json','utf8'));
+          for (const section of ['devDependencies','peerDependencies','dependencies']) {
+            if (!pkg[section]) continue;
+            for (const [k,v] of Object.entries(pkg[section])) {
+              if (k.startsWith('@openclaw/')) delete pkg[section][k];
+            }
+          }
+          fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2));
+          "
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Test
+        run: pnpm test
+
+  generate:
+    name: Generate Module
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check if generate module exists
+        id: check
+        run: |
+          if [ -f generate/package.json ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Node
+        if: steps.check.outputs.exists == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        if: steps.check.outputs.exists == 'true'
+        working-directory: generate
+        run: npm ci
+
+      - name: Build
+        if: steps.check.outputs.exists == 'true'
+        working-directory: generate
+        run: npm run build
+
+      - name: Test
+        if: steps.check.outputs.exists == 'true'
+        working-directory: generate
+        run: npm test
+
+      - name: Skip (module not present)
+        if: steps.check.outputs.exists != 'true'
+        run: echo "generate/ not present on this branch, skipping"

@@ -665,11 +665,11 @@ describe("expandEnvPlaceholder", () => {
      expect(result).toBe("prefix_${TEST_VAR}_suffix");
    });
 
-   it("is case-insensitive for env var names", () => {
-     process.env.lowercase_var = "value";
-     const result = expandEnvPlaceholder("${LOWERCASE_VAR}");
+   it("matches env var names with exact case (case-sensitive on Linux)", () => {
+     process.env.MY_CUSTOM_VAR = "value";
+     const result = expandEnvPlaceholder("${MY_CUSTOM_VAR}");
      expect(result).toBe("value");
-     delete process.env.lowercase_var;
+     delete process.env.MY_CUSTOM_VAR;
    });
  });
 
