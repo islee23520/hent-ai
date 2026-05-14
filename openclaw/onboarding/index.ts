@@ -1,7 +1,6 @@
-import { resolve } from "node:path";
 import { SessionManager, OnboardingState } from "./session.js";
 import { isTrigger } from "./parsers.js";
-import { handleMessage, ONBOARDING_EXIT_HINT, type FlowConfig } from "./flow.js";
+import { handleMessage, ONBOARDING_EXIT_HINT } from "./flow.js";
 import { sendTextMessage, type Logger } from "./discord-utils.js";
 
 export interface OnboardingConfig {
@@ -17,16 +16,21 @@ export interface OnboardingRuntime {
   isOnboardingMessage: (channelId: string, userId: string, content: string, sessionKey?: string) => boolean;
 }
 
+export type OnboardingImageDirResolver = (context: {
+  metadata?: Record<string, unknown>;
+  sessionKey?: string;
+}) => string;
+
 function sanitizeWorkspaceSegment(value: string): string {
   return value.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 80) || "unknown";
 }
 
 export function buildOnboardingWorkspaceDir(imageDir: string, channelId: string, scopeId: string): string {
-  return resolve(
-    imageDir,
+  return [
+    imageDir.replace(/\/+$/, ""),
     ".onboarding-workspaces",
     `${sanitizeWorkspaceSegment(channelId)}-${sanitizeWorkspaceSegment(scopeId)}`,
-  );
+  ].join("/");
 }
 
 export interface PluginApi {
@@ -41,7 +45,7 @@ export interface PluginApi {
 export function registerOnboarding(
   api: PluginApi,
   botToken: string,
-  imageDir: string,
+  imageDir: string | OnboardingImageDirResolver,
   onboardingConfig: OnboardingConfig,
 ): OnboardingRuntime | null {
   if (onboardingConfig.enabled === false) return null;
@@ -49,13 +53,7 @@ export function registerOnboarding(
   const sessions = new SessionManager(onboardingConfig.sessionTimeoutMs);
   const logger = api.logger;
 
-  const flowConfig: FlowConfig = {
-    token: botToken,
-    imageDir,
-    model: onboardingConfig.model,
-    size: onboardingConfig.size,
-    logger,
-  };
+  const resolveImageDir = typeof imageDir === "function" ? imageDir : () => imageDir;
 
   const runtime: OnboardingRuntime = {
     isOnboardingMessage: (channelId, userId, content, sessionKey) => {
@@ -86,6 +84,7 @@ export function registerOnboarding(
       const sessionScope = sessionKey ?? userId;
       const messageId = metadata?.messageId as string | undefined;
       const trimmed = content.trim();
+      const activeImageDir = resolveImageDir({ metadata, sessionKey });
 
       if (isTrigger(trimmed)) {
         const existing = sessions.getByChannel(channelId);
@@ -123,7 +122,7 @@ export function registerOnboarding(
           return;
         }
 
-        const workspaceDir = buildOnboardingWorkspaceDir(imageDir, channelId, sessionScope);
+        const workspaceDir = buildOnboardingWorkspaceDir(activeImageDir, channelId, sessionScope);
         sessions.create(channelId, sessionScope, workspaceDir);
         await sendTextMessage(
           botToken,
@@ -148,7 +147,13 @@ export function registerOnboarding(
       if (!session) return;
       if (session.state === OnboardingState.COMPLETED) return;
 
-      await handleMessage(session, sessions, trimmed, channelId, messageId, flowConfig);
+      await handleMessage(session, sessions, trimmed, channelId, messageId, {
+        token: botToken,
+        imageDir: activeImageDir,
+        model: onboardingConfig.model,
+        size: onboardingConfig.size,
+        logger,
+      });
     },
     { name: "emotion-image-onboarding" },
   );
