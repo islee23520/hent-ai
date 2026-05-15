@@ -4,7 +4,7 @@ import { dirname, isAbsolute, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { generateImage, type GenerateOptions } from "@hent-ai/generate";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
-import { registerOnboarding, type OnboardingConfig } from "./onboarding/index.js";
+import { registerOnboarding, type OnboardingConfig, type IntentDetector } from "./onboarding/index.js";
 import { sendImageBufferMessage, sendTextMessage } from "./onboarding/discord-utils.js";
 
 const LLM_TIMEOUT_MS = 15_000;
@@ -335,13 +335,14 @@ async function classifyEmotionViaAnthropic(
   return emotion;
 }
 
-async function classifyCheerIntentViaOpenAI(
+async function classifyBooleanIntentViaOpenAI(
   baseUrl: string,
   apiKey: string,
   modelId: string,
-  text: string,
+  prompt: string,
   signal: AbortSignal,
   logger: { warn: (...args: any[]) => void },
+  intentName = "cheer",
 ): Promise<boolean | null> {
   const url = `${baseUrl.replace(/\/+$/, "")}/chat/completions`;
   const response = await fetch(url, {
@@ -353,12 +354,7 @@ async function classifyCheerIntentViaOpenAI(
     },
     body: JSON.stringify({
       model: modelId,
-      messages: [
-        {
-          role: "user",
-          content: buildCheerIntentPrompt(text),
-        },
-      ],
+      messages: [{ role: "user", content: prompt }],
       max_tokens: 10,
       temperature: 0,
     }),
@@ -367,7 +363,7 @@ async function classifyCheerIntentViaOpenAI(
 
   if (!response.ok) {
     const body = await response.text().catch(() => "(no body)");
-    logger.warn(`emotion-image: OpenAI cheer intent returned ${response.status} from ${url}: ${body.slice(0, 500)}`);
+    logger.warn(`emotion-image: OpenAI ${intentName} intent returned ${response.status} from ${url}: ${body.slice(0, 500)}`);
     return null;
   }
 
@@ -377,18 +373,26 @@ async function classifyCheerIntentViaOpenAI(
   const content = data?.choices?.[0]?.message?.content;
   const intent = extractBooleanIntent(content);
   if (intent === null) {
-    logger.warn(`emotion-image: OpenAI cheer intent parse failed, raw="${content ?? "(no content)"}"`);
+    logger.warn(`emotion-image: OpenAI ${intentName} intent parse failed, raw="${content ?? "(no content)"}"`);
   }
   return intent;
 }
 
-async function classifyCheerIntentViaAnthropic(
+async function classifyCheerIntentViaOpenAI(
+  baseUrl: string, apiKey: string, modelId: string, text: string,
+  signal: AbortSignal, logger: { warn: (...args: any[]) => void },
+): Promise<boolean | null> {
+  return classifyBooleanIntentViaOpenAI(baseUrl, apiKey, modelId, buildCheerIntentPrompt(text), signal, logger, "cheer");
+}
+
+async function classifyBooleanIntentViaAnthropic(
   baseUrl: string,
   apiKey: string,
   modelId: string,
-  text: string,
+  prompt: string,
   signal: AbortSignal,
   logger: { warn: (...args: any[]) => void },
+  intentName = "cheer",
 ): Promise<boolean | null> {
   const url = `${baseUrl.replace(/\/+$/, "")}/messages`;
   const response = await fetch(url, {
@@ -403,19 +407,14 @@ async function classifyCheerIntentViaAnthropic(
       model: modelId,
       max_tokens: 10,
       temperature: 0,
-      messages: [
-        {
-          role: "user",
-          content: buildCheerIntentPrompt(text),
-        },
-      ],
+      messages: [{ role: "user", content: prompt }],
     }),
     signal,
   });
 
   if (!response.ok) {
     const body = await response.text().catch(() => "(no body)");
-    logger.warn(`emotion-image: Anthropic cheer intent returned ${response.status} from ${url}: ${body.slice(0, 500)}`);
+    logger.warn(`emotion-image: Anthropic ${intentName} intent returned ${response.status} from ${url}: ${body.slice(0, 500)}`);
     return null;
   }
 
@@ -425,9 +424,97 @@ async function classifyCheerIntentViaAnthropic(
   const content = data?.content?.[0]?.text;
   const intent = extractBooleanIntent(content);
   if (intent === null) {
-    logger.warn(`emotion-image: Anthropic cheer intent parse failed, raw="${content ?? "(no content)"}"`);
+    logger.warn(`emotion-image: Anthropic ${intentName} intent parse failed, raw="${content ?? "(no content)"}"`);
   }
   return intent;
+}
+
+async function classifyCheerIntentViaAnthropic(
+  baseUrl: string, apiKey: string, modelId: string, text: string,
+  signal: AbortSignal, logger: { warn: (...args: any[]) => void },
+): Promise<boolean | null> {
+  return classifyBooleanIntentViaAnthropic(baseUrl, apiKey, modelId, buildCheerIntentPrompt(text), signal, logger, "cheer");
+}
+
+function buildOnboardingIntentPrompt(text: string): string {
+  return [
+    "Decide whether the user's message is requesting to set up, configure, create, change, or regenerate the bot's character images or emotion images.",
+    "This includes requests like: starting onboarding, setting up the character, changing the avatar, creating new emotion images, regenerating images, customizing the bot's appearance, etc.",
+    "Return ONLY yes or no.",
+    "Answer yes for any intent related to character/image setup, onboarding, or appearance customization.",
+    "Answer no for normal conversation, questions, commands, greetings, or unrelated requests.",
+    `Message: ${text}`,
+  ].join("\n");
+}
+
+export async function detectOnboardingIntentWithLLM(
+  classifierModel: string,
+  text: string,
+  runtime: {
+    config: {
+      current: () => { models?: { providers?: Record<string, { baseUrl?: string; api?: string }> } };
+    };
+    modelAuth: {
+      resolveApiKeyForProvider: (params: {
+        provider: string;
+        cfg?: unknown;
+      }) => Promise<{ apiKey?: string }>;
+    };
+  },
+  logger: { warn: (...args: any[]) => void },
+): Promise<boolean> {
+  const slashIdx = classifierModel.indexOf("/");
+  if (slashIdx === -1) {
+    logger.warn(`emotion-image: onboarding intent model "${classifierModel}" missing "/" separator`);
+    return false;
+  }
+  const providerName = classifierModel.slice(0, slashIdx);
+  const modelId = classifierModel.slice(slashIdx + 1);
+  if (!providerName || !modelId) {
+    logger.warn(`emotion-image: onboarding intent model "${classifierModel}" could not be parsed`);
+    return false;
+  }
+
+  const cfg = runtime.config.current();
+  const providerCfg = cfg.models?.providers?.[providerName];
+  if (!providerCfg?.baseUrl) {
+    logger.warn(`emotion-image: onboarding intent provider "${providerName}" not found or missing baseUrl`);
+    return false;
+  }
+
+  let apiKey: string | undefined;
+  try {
+    const auth = await runtime.modelAuth.resolveApiKeyForProvider({
+      provider: providerName,
+      cfg: providerCfg,
+    });
+    apiKey = auth.apiKey;
+  } catch (err) {
+    logger.warn(`emotion-image: failed to resolve onboarding intent apiKey: ${err}`);
+    return false;
+  }
+
+  if (!apiKey) {
+    logger.warn(`emotion-image: no onboarding intent apiKey resolved for "${providerName}"`);
+    return false;
+  }
+
+  const baseUrl = providerCfg.baseUrl.replace(/\/+$/, "");
+  const apiType: ApiType = detectApiType(providerCfg.api);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), LLM_TIMEOUT_MS);
+  try {
+    const prompt = buildOnboardingIntentPrompt(text);
+    const result = apiType === "anthropic-messages"
+      ? await classifyBooleanIntentViaAnthropic(baseUrl, apiKey, modelId, prompt, controller.signal, logger, "onboarding")
+      : await classifyBooleanIntentViaOpenAI(baseUrl, apiKey, modelId, prompt, controller.signal, logger, "onboarding");
+    return result ?? false;
+  } catch (err) {
+    logger.warn(`emotion-image: onboarding intent LLM call error: ${err}`);
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export async function detectCheerIntentWithLLM(
@@ -1378,7 +1465,11 @@ export default definePluginEntry({
 
     api.logger.info(`emotion-image: token found (len=${botToken.length}), imageDir=${imageDir}`);
 
-    const onboardingRuntime = registerOnboarding(api, botToken, imageDir, pluginConfig.onboarding ?? {});
+    const onboardingIntentDetector: IntentDetector | undefined = classifierModel
+      ? async (text: string) => detectOnboardingIntentWithLLM(classifierModel, text, api.runtime, api.logger)
+      : undefined;
+
+    const onboardingRuntime = registerOnboarding(api, botToken, imageDir, pluginConfig.onboarding ?? {}, onboardingIntentDetector);
 
       const cheerConfig = pluginConfig.cheer ?? {};
       const cheerEnabled = cheerConfig.enabled !== false;

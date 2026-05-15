@@ -1,7 +1,6 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { SessionManager, OnboardingState, EMOTIONS } from "./session.js";
-import { isTrigger } from "./parsers.js";
 import { handleMessage, ONBOARDING_EXIT_HINT, type FlowConfig } from "./flow.js";
 import { sendTextMessage, type Logger } from "./discord-utils.js";
 
@@ -25,6 +24,8 @@ export interface OnboardingConfig {
   allowedUsers?: string[];
 }
 
+export type IntentDetector = (text: string) => Promise<boolean>;
+
 export interface OnboardingRuntime {
   isOnboardingMessage: (channelId: string, userId: string, content: string) => boolean;
 }
@@ -43,6 +44,7 @@ export function registerOnboarding(
   botToken: string,
   imageDir: string,
   onboardingConfig: OnboardingConfig,
+  detectIntent?: IntentDetector,
 ): OnboardingRuntime | null {
   if (onboardingConfig.enabled === false) return null;
 
@@ -59,8 +61,8 @@ export function registerOnboarding(
 
   const runtime: OnboardingRuntime = {
     isOnboardingMessage: (channelId, userId, content) => {
-      const trimmed = content.trim();
-      if (isTrigger(trimmed)) return true;
+      // For sync check, only look at active sessions.
+      // Trigger detection is async (LLM) and handled in the message_received hook.
       return sessions.get(channelId, userId) !== null;
     },
   };
@@ -84,7 +86,11 @@ export function registerOnboarding(
       const messageId = metadata?.messageId as string | undefined;
       const trimmed = content.trim();
 
-      if (isTrigger(trimmed)) {
+      // LLM-based intent detection for onboarding trigger
+      const isOnboardingRequest = detectIntent ? await detectIntent(trimmed) : false;
+
+      if (isOnboardingRequest) {
+        logger.info(`onboarding: LLM detected onboarding intent from user=${userId} text="${trimmed.slice(0, 50)}"`);
         const existing = sessions.getByChannel(channelId);
         if (existing && existing.userId !== userId) {
           await sendTextMessage(
