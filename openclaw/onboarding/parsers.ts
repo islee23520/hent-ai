@@ -13,7 +13,7 @@ const SKIP = /^(스킵|skip|건너뛰기|넘어가|패스)/i;
 const CANCEL = /^(취소|cancel|quit|종료|그만)/i;
 const USE_AS_BASE = /^(1|그대로|그거|사용|use|as.?is|이거로|이걸로)/i;
 const USE_AS_REF = /^(2|참고|레퍼런스|reference|새로|생성|new)/i;
-const TRIGGER = /^(onboarding|온보딩|셋업|setup)\s*$/i;
+const TRIGGER = /^(onboarding|온보딩|셋업|setup)[\s!]*$/i;
 
 export function parseIntent(text: string): UserIntent {
   const trimmed = text.trim();
