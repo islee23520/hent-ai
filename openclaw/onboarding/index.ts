@@ -1,8 +1,8 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
-import { SessionManager, OnboardingState, EMOTIONS } from "./session.js";
-import { handleMessage, ONBOARDING_EXIT_HINT, type FlowConfig } from "./flow.js";
-import { sendTextMessage, type Logger } from "./discord-utils.js";
+import { type Logger, sendTextMessage } from "./discord-utils.js";
+import { type FlowConfig, handleMessage, ONBOARDING_EXIT_HINT } from "./flow.js";
+import { EMOTIONS, OnboardingState, SessionManager } from "./session.js";
 
 /**
  * Check if emotion images already exist in the image directory.
@@ -37,6 +37,8 @@ export type OnboardingImageDirResolver = (context: {
   sessionKey?: string;
 }) => string;
 
+export type OnboardingChannelGate = (channelId: string) => boolean;
+
 function sanitizeWorkspaceSegment(value: string): string {
   return value.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 80) || "unknown";
 }
@@ -64,6 +66,7 @@ export function registerOnboarding(
   imageDir: string | OnboardingImageDirResolver,
   onboardingConfig: OnboardingConfig,
   detectIntent?: IntentDetector,
+  isChannelEnabled?: OnboardingChannelGate,
 ): OnboardingRuntime | null {
   if (onboardingConfig.enabled === false) return null;
 
@@ -120,6 +123,7 @@ export function registerOnboarding(
       if (!rawTo) return;
       const channelId = rawTo.startsWith("channel:") ? rawTo.slice(8) : rawTo;
       if (!channelId || !/^\d+$/.test(channelId)) return;
+      if (isChannelEnabled && !isChannelEnabled(channelId)) return;
 
       const userId = senderId ?? (metadata?.from as string) ?? "unknown";
       const sessionScope = sessionKey ?? userId;

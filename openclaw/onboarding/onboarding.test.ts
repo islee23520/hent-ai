@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { buildOnboardingWorkspaceDir, registerOnboarding } from "./index.js";
 import { getOnboardingSkill, ONBOARDING_EXIT_HINT, ONBOARDING_SKILLS } from "./flow.js";
+import { buildOnboardingWorkspaceDir, registerOnboarding } from "./index.js";
 import { isTrigger, parseImageIntent, parseIntent } from "./parsers.js";
 import { OnboardingState, SessionManager } from "./session.js";
 
@@ -291,5 +291,28 @@ describe("onboarding runtime", () => {
     );
 
     expect(runtime).toBeNull();
+  });
+
+  it("does not start onboarding in disabled channels", async () => {
+    const handlers: Array<(event: unknown, ctx: unknown) => Promise<void>> = [];
+    const runtime = registerOnboarding(
+      {
+        on: (_event, handler) => handlers.push(handler),
+        logger: { info: () => {}, warn: () => {}, error: () => {} },
+      },
+      "token",
+      "/tmp/hent-ai-test-assets",
+      {},
+      undefined,
+      (channelId) => channelId !== "123",
+    );
+
+    await handlers[0]?.({
+      content: "onboarding",
+      senderId: "user1",
+      metadata: { to: "channel:123", messageId: "msg1" },
+    }, {});
+
+    expect(runtime?.hasActiveSession("123")).toBe(false);
   });
 });
