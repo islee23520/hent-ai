@@ -137,6 +137,7 @@ async function handleAwaitingCharacter(
   messageId: string | undefined,
   config: FlowConfig,
 ): Promise<void> {
+  const { token, logger } = config;
   const intent = parseIntent(content);
 
   if (intent.type === "cancel") {

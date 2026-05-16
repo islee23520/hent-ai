@@ -1,7 +1,19 @@
-import { SessionManager, OnboardingState } from "./session.js";
-import { isTrigger } from "./parsers.js";
-import { handleMessage, ONBOARDING_EXIT_HINT } from "./flow.js";
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
+import { SessionManager, OnboardingState, EMOTIONS } from "./session.js";
+import { handleMessage, ONBOARDING_EXIT_HINT, type FlowConfig } from "./flow.js";
 import { sendTextMessage, type Logger } from "./discord-utils.js";
+
+/**
+ * Check if emotion images already exist in the image directory.
+ * Returns the list of existing emotion filenames.
+ */
+function detectExistingAssets(imageDir: string): string[] {
+  return EMOTIONS.filter((e) => {
+    const filePath = resolve(imageDir, `${e}.png`);
+    return existsSync(filePath);
+  });
+}
 
 export interface OnboardingConfig {
   enabled?: boolean;
@@ -12,8 +24,12 @@ export interface OnboardingConfig {
   allowedUsers?: string[];
 }
 
+export type IntentDetector = (text: string) => Promise<boolean>;
+
 export interface OnboardingRuntime {
   isOnboardingMessage: (channelId: string, userId: string, content: string, sessionKey?: string) => boolean;
+  /** Returns true if the given channel has an active onboarding session. */
+  hasActiveSession: (channelId: string) => boolean;
 }
 
 export type OnboardingImageDirResolver = (context: {
@@ -47,20 +63,45 @@ export function registerOnboarding(
   botToken: string,
   imageDir: string | OnboardingImageDirResolver,
   onboardingConfig: OnboardingConfig,
+  detectIntent?: IntentDetector,
 ): OnboardingRuntime | null {
   if (onboardingConfig.enabled === false) return null;
 
   const sessions = new SessionManager(onboardingConfig.sessionTimeoutMs);
   const logger = api.logger;
-
   const resolveImageDir = typeof imageDir === "function" ? imageDir : () => imageDir;
+
+  // Inline trigger detection to avoid jiti cache staleness.
+  // jiti hashes only the entry file (index.ts), not transitive deps like parsers.ts.
+  // When parsers.ts changes but index.ts doesn't, the old compiled code is served.
+  const TRIGGER_KEYWORDS = /봇|캐릭터|이미지|셋업|setup|onboarding|온보딩|생성|만들|바꾸/i;
+  const TRIGGER_ACTIONS = /하고|하자|해줘|해줄|시작|할래|하고파|할까|start|begin|want|원해|해봐|해보|만들|새로|다시|바꾸/i;
+  const TRIGGER_EXACT = /^(onboarding|온보딩|셋업|setup)[\s!.]*$/i;
+
+  function isOnboardingTrigger(text: string): boolean {
+    const trimmed = text.trim();
+    if (TRIGGER_EXACT.test(trimmed)) return true;
+    return TRIGGER_KEYWORDS.test(trimmed) && TRIGGER_ACTIONS.test(trimmed);
+  }
+
+  async function shouldStartOnboarding(trimmed: string): Promise<boolean> {
+    if (isOnboardingTrigger(trimmed)) return true;
+    if (!detectIntent) return false;
+    try {
+      return await detectIntent(trimmed);
+    } catch (err) {
+      logger.warn(`onboarding: intent detector failed: ${err}`);
+      return false;
+    }
+  }
 
   const runtime: OnboardingRuntime = {
     isOnboardingMessage: (channelId, userId, content, sessionKey) => {
       const trimmed = content.trim();
-      if (isTrigger(trimmed)) return true;
+      if (isOnboardingTrigger(trimmed)) return true;
       return sessions.get(channelId, sessionKey ?? userId) !== null;
     },
+    hasActiveSession: (channelId) => sessions.getByChannel(channelId) !== null,
   };
 
   api.on(
@@ -86,7 +127,8 @@ export function registerOnboarding(
       const trimmed = content.trim();
       const activeImageDir = resolveImageDir({ metadata, sessionKey });
 
-      if (isTrigger(trimmed)) {
+      if (await shouldStartOnboarding(trimmed)) {
+        logger.info(`onboarding: trigger detected from user=${userId} text="${trimmed.slice(0, 50)}"`);
         const existing = sessions.getByChannel(channelId);
         if (existing && existing.userId !== sessionScope) {
           await sendTextMessage(
@@ -124,6 +166,28 @@ export function registerOnboarding(
 
         const workspaceDir = buildOnboardingWorkspaceDir(activeImageDir, channelId, sessionScope);
         sessions.create(channelId, sessionScope, workspaceDir);
+
+        // Check for existing assets (returning user detection)
+        const existingAssets = detectExistingAssets(activeImageDir);
+        const isReturningUser = existingAssets.length >= EMOTIONS.length;
+
+        if (isReturningUser) {
+          // Returning user — offer upgrade path instead of full onboard
+          await sendTextMessage(
+            botToken,
+            channelId,
+            "🎨 Hent-ai 온보딩 — 이미 세팅되어 있어요!\n\n" +
+              `현재 ${existingAssets.length}개 감정 이미지가 설치되어 있습니다: ${existingAssets.join(", ")}\n\n` +
+              "선택해주세요:\n" +
+              '1️⃣ "처음부터" — 새 캐릭터로 전체 다시 생성\n' +
+              '2️⃣ "업데이트" — 특정 감정만 다시 생성\n' +
+              '3️⃣ "취소" — 온보딩 종료\n\n' +
+              ONBOARDING_EXIT_HINT,
+            logger,
+          );
+          return;
+        }
+
         await sendTextMessage(
           botToken,
           channelId,
@@ -147,13 +211,15 @@ export function registerOnboarding(
       if (!session) return;
       if (session.state === OnboardingState.COMPLETED) return;
 
-      await handleMessage(session, sessions, trimmed, channelId, messageId, {
+      const flowConfig: FlowConfig = {
         token: botToken,
         imageDir: activeImageDir,
         model: onboardingConfig.model,
         size: onboardingConfig.size,
         logger,
-      });
+      };
+
+      await handleMessage(session, sessions, trimmed, channelId, messageId, flowConfig);
     },
     { name: "emotion-image-onboarding" },
   );

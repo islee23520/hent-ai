@@ -16,8 +16,8 @@ describe("parsers", () => {
 
     it("rejects non-trigger text", () => {
       expect(isTrigger("hello")).toBe(false);
-      expect(isTrigger("onboarding now")).toBe(false);
-      expect(isTrigger("start onboarding")).toBe(false);
+      expect(isTrigger("start onboarding")).toBe(true);
+      expect(isTrigger("just mentioning onboarding in passing")).toBe(false);
     });
   });
 
@@ -48,6 +48,11 @@ describe("parsers", () => {
       expect(parseIntent("취소").type).toBe("cancel");
       expect(parseIntent("cancel").type).toBe("cancel");
       expect(parseIntent("종료").type).toBe("cancel");
+    });
+
+    it("detects image-use shortcuts in general intent parsing", () => {
+      expect(parseIntent("1").type).toBe("use_as_base");
+      expect(parseIntent("2").type).toBe("use_as_reference");
     });
 
     it("returns feedback for unrecognized text", () => {
@@ -217,6 +222,7 @@ describe("onboarding runtime", () => {
 
     expect(runtime?.isOnboardingMessage("123", "user1", "onboarding")).toBe(true);
     expect(runtime?.isOnboardingMessage("123", "user1", "hello")).toBe(false);
+    expect(runtime?.hasActiveSession("123")).toBe(false);
 
     await handlers[0]?.({
       content: "onboarding",
@@ -225,6 +231,8 @@ describe("onboarding runtime", () => {
 
     expect(runtime?.isOnboardingMessage("123", "user1", "cute cat")).toBe(true);
     expect(runtime?.isOnboardingMessage("123", "user2", "cute cat")).toBe(false);
+    expect(runtime?.hasActiveSession("123")).toBe(true);
+    expect(runtime?.hasActiveSession("456")).toBe(false);
   });
 
   it("uses OpenClaw session keys for onboarding isolation when available", async () => {
