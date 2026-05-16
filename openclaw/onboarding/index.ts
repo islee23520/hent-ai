@@ -74,19 +74,24 @@ export function registerOnboarding(
   // Inline trigger detection to avoid jiti cache staleness.
   // jiti hashes only the entry file (index.ts), not transitive deps like parsers.ts.
   // When parsers.ts changes but index.ts doesn't, the old compiled code is served.
-  const TRIGGER_KEYWORDS = /봇|캐릭터|이미지|셋업|setup|onboarding|온보딩|생성|만들|바꾸/i;
-  const TRIGGER_ACTIONS = /하고|하자|해줘|해줄|시작|할래|하고파|할까|start|begin|want|원해|해봐|해보|만들|새로|다시|바꾸/i;
-  const TRIGGER_EXACT = /^(onboarding|온보딩|셋업|setup)[\s!.]*$/i;
+  // Strict exact-match triggers only. Previously keyword+action dual-match caused
+  // false positives on normal messages containing common words like 만들/바꾸/이미지.
+  // LLM intent detector handles fuzzy/natural-language onboarding requests.
+  const TRIGGER_EXACT = /^(onboarding|온보딩|셋업|setup|캐릭터\s*(만들|생성|바꾸)|이미지\s*온보딩)[\s!.]*$/i;
 
   function isOnboardingTrigger(text: string): boolean {
     const trimmed = text.trim();
-    if (TRIGGER_EXACT.test(trimmed)) return true;
-    return TRIGGER_KEYWORDS.test(trimmed) && TRIGGER_ACTIONS.test(trimmed);
+    // Only trigger on short, clearly intentional messages (≤30 chars)
+    if (trimmed.length > 30) return false;
+    return TRIGGER_EXACT.test(trimmed);
   }
 
   async function shouldStartOnboarding(trimmed: string): Promise<boolean> {
     if (isOnboardingTrigger(trimmed)) return true;
     if (!detectIntent) return false;
+    // Skip LLM intent detection for long messages (>100 chars) — they're almost
+    // certainly normal conversation, not onboarding requests.
+    if (trimmed.length > 100) return false;
     try {
       return await detectIntent(trimmed);
     } catch (err) {
