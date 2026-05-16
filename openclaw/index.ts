@@ -741,7 +741,7 @@ export async function getCachedOrGenerateImage(
   variants: EmotionImageVariant[],
   miracleMode: boolean,
   rateLimiter: RateLimiter,
-  generateOptions: GenerateOptions,
+  generateOptions: Omit<GenerateOptions, "prompt">,
   logger: { info: (...args: any[]) => void; warn: (...args: any[]) => void },
   random = Math.random,
   contextText = "",
@@ -769,7 +769,10 @@ export async function getCachedOrGenerateImage(
     logger.info(`emotion-image: miracle mode generating image for emotion="${emotion}"`);
     const prompt = `A cute anime-style character expressing ${emotion} emotion. ` +
                    `Simple, clean illustration with soft colors and expressive face.`;
-    const buffer = await generateImage(prompt, generateOptions);
+    const buffer = await generateImage({
+      ...generateOptions,
+      prompt,
+    });
     rateLimiter.recordGeneration();
     logger.info(
       `emotion-image: miracle mode generated image (${buffer.length} bytes). ` +

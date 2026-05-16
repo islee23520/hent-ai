@@ -997,10 +997,10 @@ describe("miracle mode", () => {
       expect(result).toBe(generatedBuffer);
       expect(mockRateLimiter.canGenerate).toHaveBeenCalled();
       expect(mockRateLimiter.recordGeneration).toHaveBeenCalled();
-      expect(generateImage).toHaveBeenCalledWith(
-        expect.stringContaining("excited"),
-        { size: "1024x1024" },
-      );
+      expect(generateImage).toHaveBeenCalledWith({
+        prompt: expect.stringContaining("excited"),
+        size: "1024x1024",
+      });
     });
 
     it("returns null when rate limit is exceeded", async () => {
