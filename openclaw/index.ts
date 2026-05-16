@@ -1380,6 +1380,7 @@ export default definePluginEntry({
     // Per-channel toggle
     const channelMode = pluginConfig.channels?.mode ?? "blocklist";
     const channelList = new Set(pluginConfig.channels?.list ?? []);
+    api.logger.info(`emotion-image: channel filter mode=${channelMode} list=[${[...channelList].join(',')}] (${channelList.size} entries)`);
     function isChannelEnabled(channelId: string): boolean {
       if (channelList.size === 0) return true; // no list = all enabled
       if (channelMode === "allowlist") return channelList.has(channelId);
