@@ -74,24 +74,16 @@ export function registerOnboarding(
   // Inline trigger detection to avoid jiti cache staleness.
   // jiti hashes only the entry file (index.ts), not transitive deps like parsers.ts.
   // When parsers.ts changes but index.ts doesn't, the old compiled code is served.
-  // Strict exact-match triggers only. Previously keyword+action dual-match caused
-  // false positives on normal messages containing common words like 만들/바꾸/이미지.
-  // LLM intent detector handles fuzzy/natural-language onboarding requests.
-  const TRIGGER_EXACT = /^(onboarding|온보딩|셋업|setup|캐릭터\s*(만들|생성|바꾸)|이미지\s*온보딩)[\s!.]*$/i;
-
-  function isOnboardingTrigger(text: string): boolean {
-    const trimmed = text.trim();
-    // Only trigger on short, clearly intentional messages (≤30 chars)
-    if (trimmed.length > 30) return false;
-    return TRIGGER_EXACT.test(trimmed);
-  }
+  // Onboarding trigger detection is fully LLM-based.
+  // No keyword/regex matching — the LLM reads the user's actual intent.
+  // This avoids false positives from normal messages that happen to contain
+  // words like "만들", "이미지", "바꾸" in unrelated context.
 
   async function shouldStartOnboarding(trimmed: string): Promise<boolean> {
-    if (isOnboardingTrigger(trimmed)) return true;
     if (!detectIntent) return false;
-    // Skip LLM intent detection for long messages (>100 chars) — they're almost
-    // certainly normal conversation, not onboarding requests.
-    if (trimmed.length > 100) return false;
+    // Messages over 200 chars are almost certainly not onboarding requests —
+    // they're paragraphs of normal conversation. Skip to save LLM calls.
+    if (trimmed.length > 200) return false;
     try {
       return await detectIntent(trimmed);
     } catch (err) {
@@ -102,8 +94,6 @@ export function registerOnboarding(
 
   const runtime: OnboardingRuntime = {
     isOnboardingMessage: (channelId, userId, content, sessionKey) => {
-      const trimmed = content.trim();
-      if (isOnboardingTrigger(trimmed)) return true;
       return sessions.get(channelId, sessionKey ?? userId) !== null;
     },
     hasActiveSession: (channelId) => sessions.getByChannel(channelId) !== null,

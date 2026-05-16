@@ -220,19 +220,45 @@ describe("onboarding runtime", () => {
       {},
     );
 
-    expect(runtime?.isOnboardingMessage("123", "user1", "onboarding")).toBe(true);
+    // isOnboardingMessage no longer checks trigger keywords — it only checks active sessions.
+    // Trigger detection is handled by shouldStartOnboarding (LLM-based) in the event handler.
+    expect(runtime?.isOnboardingMessage("123", "user1", "onboarding")).toBe(false);
     expect(runtime?.isOnboardingMessage("123", "user1", "hello")).toBe(false);
     expect(runtime?.hasActiveSession("123")).toBe(false);
 
+    // Without a detectIntent function, shouldStartOnboarding always returns false,
+    // so sending "onboarding" won't start a session.
     await handlers[0]?.({
       content: "onboarding",
       metadata: { to: "channel:123", from: "user1", messageId: "msg1" },
     }, {});
 
-    expect(runtime?.isOnboardingMessage("123", "user1", "cute cat")).toBe(true);
-    expect(runtime?.isOnboardingMessage("123", "user2", "cute cat")).toBe(false);
-    expect(runtime?.hasActiveSession("123")).toBe(true);
-    expect(runtime?.hasActiveSession("456")).toBe(false);
+    // No session started (no LLM intent detector provided)
+    expect(runtime?.isOnboardingMessage("123", "user1", "cute cat")).toBe(false);
+    expect(runtime?.hasActiveSession("123")).toBe(false);
+  });
+
+  it("starts onboarding when LLM intent detector returns true", async () => {
+    const handlers: Array<(event: unknown, ctx: unknown) => Promise<void>> = [];
+    const runtime = registerOnboarding(
+      {
+        on: (_event, handler) => handlers.push(handler),
+        logger: { info: () => {}, warn: () => {}, error: () => {} },
+      },
+      "token",
+      "/tmp/hent-ai-test-assets",
+      {},
+      async () => true, // LLM says: yes, this is onboarding intent
+    );
+
+    await handlers[0]?.({
+      content: "캐릭터 이미지 만들어줘",
+      metadata: { to: "channel:789", from: "user1", messageId: "msg1" },
+    }, {});
+
+    expect(runtime?.isOnboardingMessage("789", "user1", "cute cat")).toBe(true);
+    expect(runtime?.hasActiveSession("789")).toBe(true);
+    expect(runtime?.hasActiveSession("000")).toBe(false);
   });
 
   it("uses OpenClaw session keys for onboarding isolation when available", async () => {
@@ -245,6 +271,7 @@ describe("onboarding runtime", () => {
       "token",
       "/tmp/hent-ai-test-assets",
       {},
+      async () => true, // LLM intent detector
     );
 
     await handlers[0]?.({

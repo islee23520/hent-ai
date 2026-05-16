@@ -1,4 +1,4 @@
-// emotion-image plugin v3.2.0 - asset sets + channel filter fix
+// emotion-image plugin v3.3.0 - asset sets + channel filter fix
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, isAbsolute, resolve, sep } from "node:path";
@@ -433,11 +433,22 @@ async function classifyCheerIntentViaAnthropic(
 
 function buildOnboardingIntentPrompt(text: string): string {
   return [
-    "Decide whether the user's message is requesting to set up, configure, create, change, or regenerate the bot's character images or emotion images.",
-    "This includes requests like: starting onboarding, setting up the character, changing the avatar, creating new emotion images, regenerating images, customizing the bot's appearance, etc.",
+    "You are an intent classifier. Decide if the user's PRIMARY INTENT is to start the bot's character image onboarding flow.",
+    "",
+    "Onboarding means the user DIRECTLY wants to:",
+    "- Create, generate, or set up the bot's character/emotion images",
+    "- Start the onboarding/setup process for the bot's appearance",
+    "- Change or regenerate the bot's avatar/character design",
+    "",
+    "NOT onboarding (answer no):",
+    "- Talking ABOUT images, characters, or bots in general conversation",
+    "- Discussing system architecture, code, features, or bugs",
+    "- Asking questions, giving feedback, sharing links or articles",
+    "- Messages that merely MENTION images/characters but aren't requesting the onboarding flow",
+    "- Any message where the primary intent is something other than starting onboarding",
+    "",
+    "The message must be a DIRECT REQUEST to start onboarding. Mentioning related words is not enough.",
     "Return ONLY yes or no.",
-    "Answer yes for any intent related to character/image setup, onboarding, or appearance customization.",
-    "Answer no for normal conversation, questions, commands, greetings, or unrelated requests.",
     `Message: ${text}`,
   ].join("\n");
 }
