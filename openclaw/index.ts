@@ -5,8 +5,7 @@ import { dirname, isAbsolute, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { generateImage, type GenerateOptions } from "@hent-ai/generate";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
-import { registerOnboarding, type OnboardingConfig, type IntentDetector } from "./onboarding/index.js";
-import { sendImageBufferMessage, sendTextMessage } from "./onboarding/discord-utils.js";
+import { sendImageBufferMessage, sendTextMessage } from "./discord-utils.js";
 import { loadManifestSync, buildEmotionMapFromSet, getActiveSet } from "./assets/manifest.js";
 
 const LLM_TIMEOUT_MS = 15_000;
@@ -431,103 +430,7 @@ async function classifyCheerIntentViaAnthropic(
   return classifyBooleanIntentViaAnthropic(baseUrl, apiKey, modelId, buildCheerIntentPrompt(text), signal, logger, "cheer");
 }
 
-function buildOnboardingIntentPrompt(text: string): string {
-  // Rasa-inspired: flow description + positive/negative examples for precise intent matching.
-  // The LLM acts as an NLU intent classifier with implicit confidence gating via examples.
-  return [
-    "You are a strict intent classifier. The flow you are checking for is:",
-    '"Start the bot character image onboarding — user wants to create, regenerate, or change the bot\'s emotion/character images right now."',
-    "",
-    "YES examples (direct request to start onboarding):",
-    '- "캐릭터 이미지 만들어줘"',
-    '- "온보딩 시작"',
-    '- "감정 이미지 새로 생성해줘"',
-    '- "봇 이미지 바꾸고 싶어"',
-    '- "setup character"',
-    "",
-    "NO examples (not onboarding — even if they mention images/characters):",
-    '- "이미지가 이상하게 보여" (bug report)',
-    '- "봇이 지가 한 일을 로그로 남기고..." (general conversation)',
-    '- "이미지 온보딩 코드를 수정해야 해" (discussing code)',
-    '- "캐릭터 디자인 트렌드가..." (talking about design)',
-    '- "만들면서 배운 것" (reflective writing)',
-    '- Any message discussing, describing, or analyzing — not requesting',
-    "",
-    "Rule: The user must be ASKING the bot TO DO the onboarding. Talking ABOUT it is not a request.",
-    "Return ONLY yes or no.",
-    `Message: ${text}`,
-  ].join("\n");
-}
 
-export async function detectOnboardingIntentWithLLM(
-  classifierModel: string,
-  text: string,
-  runtime: {
-    config: {
-      current: () => { models?: { providers?: Record<string, { baseUrl?: string; api?: string }> } };
-    };
-    modelAuth: {
-      resolveApiKeyForProvider: (params: {
-        provider: string;
-        cfg?: unknown;
-      }) => Promise<{ apiKey?: string }>;
-    };
-  },
-  logger: { warn: (...args: any[]) => void },
-): Promise<boolean> {
-  const slashIdx = classifierModel.indexOf("/");
-  if (slashIdx === -1) {
-    logger.warn(`emotion-image: onboarding intent model "${classifierModel}" missing "/" separator`);
-    return false;
-  }
-  const providerName = classifierModel.slice(0, slashIdx);
-  const modelId = classifierModel.slice(slashIdx + 1);
-  if (!providerName || !modelId) {
-    logger.warn(`emotion-image: onboarding intent model "${classifierModel}" could not be parsed`);
-    return false;
-  }
-
-  const cfg = runtime.config.current();
-  const providerCfg = cfg.models?.providers?.[providerName];
-  if (!providerCfg?.baseUrl) {
-    logger.warn(`emotion-image: onboarding intent provider "${providerName}" not found or missing baseUrl`);
-    return false;
-  }
-
-  let apiKey: string | undefined;
-  try {
-    const auth = await runtime.modelAuth.resolveApiKeyForProvider({
-      provider: providerName,
-      cfg: cfg as unknown as Record<string, unknown> | undefined,
-    });
-    apiKey = auth.apiKey;
-  } catch (err) {
-    logger.warn(`emotion-image: failed to resolve onboarding intent apiKey: ${err}`);
-    return false;
-  }
-
-  if (!apiKey) {
-    logger.warn(`emotion-image: no onboarding intent apiKey resolved for "${providerName}"`);
-    return false;
-  }
-
-  const baseUrl = providerCfg.baseUrl.replace(/\/+$/, "");
-  const apiType: ApiType = detectApiType(providerCfg.api);
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), LLM_TIMEOUT_MS);
-  try {
-    const prompt = buildOnboardingIntentPrompt(text);
-    const result = apiType === "anthropic-messages"
-      ? await classifyBooleanIntentViaAnthropic(baseUrl, apiKey, modelId, prompt, controller.signal, logger, "onboarding")
-      : await classifyBooleanIntentViaOpenAI(baseUrl, apiKey, modelId, prompt, controller.signal, logger, "onboarding");
-    return result ?? false;
-  } catch (err) {
-    logger.warn(`emotion-image: onboarding intent LLM call error: ${err}`);
-    return false;
-  } finally {
-    clearTimeout(timer);
-  }
-}
 
 export async function detectCheerIntentWithLLM(
   classifierModel: string,
@@ -1081,11 +984,10 @@ export async function handleCheerRequest(
     channelId: string;
     imageDir: string;
     config: CheerConfig;
-    onboardingConfig?: OnboardingConfig;
     logger: { info: (...args: any[]) => void; warn: (...args: any[]) => void; error: (...args: any[]) => void };
   },
 ): Promise<void> {
-  const { token, channelId, imageDir, config, onboardingConfig, logger } = params;
+  const { token, channelId, imageDir, config, logger } = params;
   const baseImagePath = assertPathInside(imageDir, "base.png");
   await sendTextMessage(
     token,
@@ -1097,8 +999,8 @@ export async function handleCheerRequest(
   try {
     const options: GenerateOptions = {
       prompt: buildCheerPrompt(config.character),
-      model: config.model ?? onboardingConfig?.model,
-      size: config.size ?? onboardingConfig?.size ?? "1024x1024",
+      model: config.model,
+      size: config.size ?? "1024x1024",
       referenceImages:
         baseImagePath && existsSync(baseImagePath)
           ? [pngBufferToDataUrl(await readFile(baseImagePath))]
@@ -1386,7 +1288,6 @@ export default definePluginEntry({
       emotionRules?: Record<string, string[]>;
       classifierModel?: string;
       discordToken?: string;
-      onboarding?: OnboardingConfig;
       cheer?: CheerConfig;
       miracleMode?: boolean;
       miracleRateLimit?: number;
@@ -1496,10 +1397,7 @@ export default definePluginEntry({
 
     api.logger.info(`emotion-image: token found (len=${botToken.length}), imageDir=${imageDir}`);
 
-    const onboardingIntentDetector: IntentDetector | undefined = classifierModel
-      ? async (text: string) => detectOnboardingIntentWithLLM(classifierModel, text, api.runtime, api.logger)
-      : undefined;
-    const onboardingRuntime = registerOnboarding(api, botToken, resolveActiveImageDir, pluginConfig.onboarding ?? {}, onboardingIntentDetector);
+
 
       const cheerConfig = pluginConfig.cheer ?? {};
       const cheerEnabled = cheerConfig.enabled !== false;
@@ -1524,8 +1422,6 @@ export default definePluginEntry({
           const discordChannelId = rawTo.startsWith("channel:") ? rawTo.slice(8) : rawTo;
           if (!discordChannelId || !/^\d+$/.test(discordChannelId)) return;
           if (!isChannelEnabled(discordChannelId)) return;
-          const userId = senderId ?? (metadata?.from as string | undefined) ?? "unknown";
-          if (onboardingRuntime?.isOnboardingMessage(discordChannelId, userId, content, sessionKey)) return;
           const activeImageDir = resolveActiveImageDir({ metadata, sessionKey });
 
           if (
@@ -1538,7 +1434,6 @@ export default definePluginEntry({
               channelId: discordChannelId,
               imageDir: activeImageDir,
               config: cheerConfig,
-              onboardingConfig: pluginConfig.onboarding,
               logger: api.logger,
            });
            return;
@@ -1588,9 +1483,6 @@ export default definePluginEntry({
       // Per-channel toggle check
       if (!isChannelEnabled(channelId)) return;
 
-      // Skip emotion image attachment for channels with active onboarding sessions
-      // to prevent duplicate images (onboarding sends images directly via Discord API)
-      if (onboardingRuntime?.hasActiveSession(channelId)) return;
 
       // Resolve workspace context for isolation
       const context: ImageDirContext = { metadata, sessionKey };

@@ -18,6 +18,6 @@
       "openclaw/plugin-sdk/plugin-entry": ["test/stubs/plugin-entry.ts"]
     }
   },
-  "include": ["index.ts", "onboarding/**/*.ts"],
+  "include": ["index.ts", "discord-utils.ts"],
   "exclude": ["dist", "node_modules", "**/*.test.ts"]
 }

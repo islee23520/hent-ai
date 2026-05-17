@@ -36,43 +36,9 @@ cd ~/.openclaw/extensions
 git clone https://github.com/IYENTeam/Hent-ai.git emotion-image
 ```
 
-### Step 2: Generate Emotion Images (Onboarding)
+### Step 2: Generate Emotion Images
 
-The easiest way to set up emotion images is through the built-in onboarding flow. Just send `onboarding` in Discord:
-
-```
-You:  onboarding
-Bot:  🎨 Starting Hent-ai onboarding!
-      Describe your character.
-
-You:  cute orange cat
-Bot:  ⏳ Generating base character...
-Bot:  [base.png] Do you like this character?
-
-You:  good
-Bot:  ⏳ Generating happy... [1/6]
-Bot:  [happy.png] Do you like it?
-
-You:  make it brighter
-Bot:  ⏳ Regenerating happy...
-Bot:  [happy.png] How about this?
-
-You:  ok
-Bot:  ⏳ Generating neutral... [2/6]
-...
-
-Bot:  ✅ Onboarding complete!
-```
-
-The onboarding will:
-1. Generate (or accept) a base character image
-2. Use the base as reference to generate each emotion variant one by one
-3. Let you provide feedback or regenerate any image you don't like
-4. Save all images to the `assets/` directory automatically
-
-You can also attach an image instead of describing a character — the bot will ask whether to use it directly as the base or as a style reference for generation.
-
-**Alternatively**, place your own 6 emotion images in the `assets/` directory manually:
+Place 6 emotion images in the `assets/` directory:
 
 ```
 assets/
@@ -83,6 +49,8 @@ assets/
 ├── confused.png
 └── focused.png
 ```
+
+See the main [README.md](../README.md#creating-emotion-images) for generation methods (CLI auto-generate or manual creation).
 
 ### Step 3: Configure OpenClaw
 
@@ -163,16 +131,11 @@ Send a message in Discord. You should see:
 | `defaultEmotion` | `string` | `"neutral"` | Fallback emotion when no match found |
 | `emotionMap` | `object` | (built-in) | Mapping from emotion name → image filename or labeled image pool. **Filenames only** — paths that escape `imageDir` are rejected. |
 | `emotionRules` | `object` | (built-in) | Custom keyword regex patterns per emotion (merged with defaults) |
-| `onboarding.enabled` | `boolean` | `true` | Enable/disable the onboarding flow |
-| `onboarding.model` | `string` | — | Provider/model for image generation (e.g. `"provider/gpt-5.4"`) |
-| `onboarding.size` | `string` | `"1024x1024"` | Generated image dimensions |
-| `onboarding.sessionTimeoutMs` | `number` | `1800000` | Session timeout in ms (default: 30 min) |
-| `onboarding.allowedUsers` | `string[]` | `[]` | User IDs allowed to run onboarding (empty = everyone) |
 | `cheer.enabled` | `boolean` | `true` | Enable one-off cheer image generation |
 | `cheer.intentModel` | `string` | `classifierModel` | Optional provider/model ID for detecting cheer/support request intent |
 | `cheer.character` | `string` | — | Optional character description for cheer images; otherwise `base.png` is used as reference when available |
-| `cheer.model` | `string` | `onboarding.model` | Optional provider/model ID for cheer image generation |
-| `cheer.size` | `string` | `onboarding.size` or `"1024x1024"` | Generated cheer image dimensions |
+| `cheer.model` | `string` | — | Optional provider/model ID for cheer image generation |
+| `cheer.size` | `string` | `"1024x1024"` | Generated cheer image dimensions |
 
 ## How It Works
 
@@ -195,7 +158,7 @@ Hent-ai operates in two phases:
 User message
   │
   ├─► [message_received hook]
-  │     ├─► If LLM detects cheer/support intent: generate + send cheer.png-style support image
+  │     ├─► If LLM detects cheer/support intent: generate + send cheer image
   │     └─► Otherwise send focused.png to channel (instant)
   │
   ▼
@@ -237,54 +200,70 @@ If neither is set, the plugin logs a warning and does nothing.
 > config paths. If you were relying on the auto-detect behavior, set
 > `EMOTION_IMAGE_DISCORD_TOKEN` or `discordToken` explicitly.
 
-## Onboarding
+## Onboarding (Agent-Driven)
 
-The onboarding flow lets users generate emotion images interactively through Discord without touching the CLI or filesystem. Internally, onboarding is skill-based: each capability (character intake, uploaded-image intent, base confirmation, emotion confirmation, and generation busy handling) is registered as an onboarding skill and dispatched by the current session state instead of a single fixed procedure. This keeps the default flow unchanged while making new onboarding capabilities pluggable in code.
+Onboarding is handled conversationally by the OpenClaw agent — no coded state machine or intent detection required. The agent reads these instructions and guides the user through the process naturally.
 
-While onboarding is active in a channel, Hent-ai pauses its normal thinking/cheer image hook for that user's onboarding messages and tells the user that onboarding mode is active. Every onboarding prompt also reminds the user that they can exit with `취소`, `cancel`, `종료`, or `그만`. Other users and other channels continue using OpenClaw normally.
+### How It Works
 
 When `imageDir` is omitted, Hent-ai stores assets under the active OpenClaw profile/workspace at `.hent-ai/emotion-image-assets`. This keeps gateway profiles from sharing or overwriting each other's emotion assets. Set `imageDir` explicitly only when you intentionally want a shared asset directory.
 
-Each onboarding session stages generated files in an isolated workspace under `imageDir/.onboarding-workspaces/<channel>-<session>`. Files are copied into the shared emotion asset directory only when onboarding completes, and cancelled sessions clean up their temporary workspace.
-
 ### Trigger
 
-Send any of these messages in a channel where the bot is active:
-- `onboarding`
-- `setup`
+When a user says `onboarding` or `setup` in Discord, the OpenClaw agent should:
 
-### Flow
+1. **Ask for character description** — Ask the user to describe their character (e.g. "cute orange cat", "pixel art robot"). The user may also attach a reference image.
 
-1. **Character input** — Describe your character in text, attach a reference image, or both.
-2. **Image intent** — If you attached an image, the bot asks: use it as-is for the base, or use it as a style reference to generate a new one?
-3. **Base confirmation** — Review the base character image. Approve, regenerate, or provide feedback (e.g. "make the eyes bigger").
-4. **Emotion loop** — The bot generates each of the 6 emotions one at a time. For each one, you can approve, skip, give feedback to regenerate, or attach your own image to replace that emotion before approving.
-5. **Done** — All 7 images (base + 6 emotions) are saved to the configured `imageDir`.
+2. **Handle attached images** — If the user attaches an image:
+   - Ask whether to use it directly as the base character, or as a style reference for generation.
 
-### Built-in onboarding skills
+3. **Generate base character** — Use the `image_generate` tool with the character description (and reference image if provided). Show the result and ask for approval.
+   - If the user approves → proceed to emotions
+   - If the user gives feedback → regenerate with feedback incorporated
+   - If the user says cancel/취소/종료 → abort
 
-| Skill | Handles |
-|-------|---------|
-| `character-intake` | First character prompt, text input, and initial image attachment detection |
-| `image-intent` | Choosing whether an uploaded image is the base or a generation reference |
-| `base-confirmation` | Approving, regenerating, or giving feedback on the base image |
-| `emotion-confirmation` | Approving, replacing, regenerating, or giving feedback on each emotion image |
-| `base-generation` / `emotion-generation` | Busy responses while image generation is running |
+4. **Generate each emotion** — For each of the 6 emotions (`happy`, `neutral`, `loyalty`, `sorry`, `confused`, `focused`), one at a time:
+   - Generate using the base image as reference with an emotion-specific prompt
+   - Show the result, ask for approval
+   - Accept feedback for regeneration, or let the user attach their own image
+   - On approval, save to the `assets/` directory
 
-### Commands during onboarding
+5. **Complete** — Confirm all images are saved and the plugin is ready to use.
 
-| Input | Action |
-|-------|--------|
-| `ok` / `good` / `yes` | Approve current image, move to next |
-| `skip` | Save current result as-is, move to next |
-| `retry` / `again` | Regenerate with same settings |
-| Image attachment during an emotion step | Use the uploaded file as the current emotion image |
-| Any other text | Treated as feedback — regenerates with your note applied |
-| `취소` / `cancel` / `종료` / `그만` | Abort onboarding |
+### Agent Prompting Guidelines
 
-### Labeled image pools
+For base character generation:
+```
+[user's character description], clean illustration style, square format, simple background, high quality PNG
+```
 
-`emotionMap` can contain multiple custom images per emotion. Each image may have a `label`, and Hent-ai now prefers variants whose label appears in the bot response context before falling back to weighted random selection:
+For emotion variants (use base image as reference):
+```
+Same character as the reference image, expressing [emotion].
+[emotion-specific cues]. Simple background, consistent art style.
+```
+
+Emotion cues:
+- `happy` — smiling, celebrating, thumbs up
+- `neutral` — calm, relaxed, default expression
+- `loyalty` — saluting, nodding, attentive
+- `sorry` — apologetic, bowing, sheepish
+- `confused` — head tilt, question mark, puzzled
+- `focused` — concentrating, working, determined
+
+### File Output
+
+Save all generated images to the configured `imageDir` (default: `../assets/` relative to the plugin):
+- `base.png` — the base character
+- `happy.png`, `neutral.png`, `loyalty.png`, `sorry.png`, `confused.png`, `focused.png`
+
+### Exit Commands
+
+The user can abort at any time with: `취소`, `cancel`, `종료`, `그만`
+
+### Labeled Image Pools
+
+`emotionMap` can contain multiple custom images per emotion. Each image may have a `label`, and Hent-ai prefers variants whose label appears in the bot response context before falling back to weighted random selection:
 
 ```jsonc
 {
@@ -298,25 +277,6 @@ Send any of these messages in a channel where the bot is active:
 ```
 
 If `label` is omitted, Hent-ai infers one from the filename by removing the emotion word and common image terms. For example, `happy-date-night.png` becomes `date night`, so a response mentioning `date night` will automatically select that image when the classified emotion is `happy`.
-
-### Config example
-
-```jsonc
-{
-  "onboarding": {
-    "enabled": true,
-    "model": "your-provider/gpt-5.4",
-    "size": "1024x1024",
-    "allowedUsers": ["123456789"]  // empty array = everyone can onboard
-  }
-}
-```
-
-### Requirements
-
-- Codex authentication on the server (`codex login`)
-- The `@hent-ai/generate` module installed alongside the plugin
-- Bot must have `SEND_MESSAGES` and `ATTACH_FILES` permissions in the channel
 
 ## Troubleshooting
 
