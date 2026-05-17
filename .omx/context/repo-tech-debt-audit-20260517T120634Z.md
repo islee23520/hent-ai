@@ -1,0 +1,25 @@
+# Deep Interview Context Snapshot — repo-tech-debt-audit
+
+- Task statement: Find all technically insufficient/weak implementation areas in this repository.
+- Desired outcome: An evidence-backed audit scope/spec before any implementation or fix work.
+- Stated solution: Use `$deep-interview` to clarify what “all” and “technical implementation gaps” should cover.
+- Probable intent hypothesis: User wants a comprehensive technical quality gap inventory for Hent-ai before planning fixes.
+- Known facts/evidence:
+  - Monorepo-like project for Hent-ai emotion-image support across OpenClaw, Hermes Agent, Cursor, plus image generator.
+  - Root README documents supported emotions and workflows.
+  - TypeScript packages: `generate`, `openclaw`, `cursor`; Python-ish Hermes plugin exists (`hermes/__init__.py`, `plugin.yaml`).
+  - Tests exist in `generate/src/*.test.ts`, `openclaw/*.test.ts`, `openclaw/assets/*.test.ts`, `cursor/test/*.test.ts`.
+  - Package scripts include Vitest and TypeScript builds for `generate` and `cursor`; `openclaw` package has tests and TS config.
+  - Potential risk areas from preflight only: multi-package consistency, generated `dist/` in repo, per-package package-lock/node_modules, OpenClaw SDK peer/workspace dependency, image generation/network/tool dependency, Discord integration boundaries, Hermes coverage unknown.
+- Constraints:
+  - Deep-interview mode must not implement fixes directly.
+  - Need codebase facts before asking about internals.
+- Unknowns/open questions:
+  - Whether the audit should include design/API/security/performance/DX/release/process gaps or only runtime bugs.
+  - Whether dependencies, packaging, CI, tests, docs, and product behavior are in scope.
+  - Expected deliverable format and prioritization style.
+- Decision-boundary unknowns:
+  - Can the agent independently classify severity and include speculative risks?
+  - Can the agent run full tests/builds/static checks during later audit/planning?
+- Likely codebase touchpoints:
+  - `generate/src/*`, `openclaw/index.ts`, `openclaw/assets/*`, `cursor/src/*`, `cursor/bin/*`, `hermes/*`, root/package configs, GitHub workflows.
