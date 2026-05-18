@@ -1,16 +1,14 @@
+// emotion-image plugin v3.2.0 - asset sets + channel filter fix
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, isAbsolute, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { generateImage, type GenerateOptions } from "@hent-ai/generate";
+import { generateImage, type GenerateOptions, type RephraseProvider } from "@hent-ai/generate";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
-import { sendImageBufferMessage, sendTextMessage } from "./discord-utils.js";
-import { loadManifestSync, buildEmotionMapFromSet, getActiveSet } from "./assets/manifest.js";
-import {
-  DEFAULT_EMOTION_MAP as SHARED_DEFAULT_EMOTION_MAP,
-  EMOTION_RULES as SHARED_EMOTION_RULES,
-  DEFAULT_EMOTION as SHARED_DEFAULT_EMOTION,
-} from "@hent-ai/shared";
+import { sendImageBufferMessage, sendTextMessage } from "./onboarding/discord-utils.js";
+import { registerOnboarding, type IntentDetector, type OnboardingConfig } from "./onboarding/index.js";
+import { loadManifestSync, buildEmotionMapFromSet, getActiveSet, getSetDir } from "./assets/manifest.js";
+import { loadChannelOverridesSync } from "./assets/channel-overrides.js";
 
 const LLM_TIMEOUT_MS = 15_000;
 
@@ -89,6 +87,10 @@ export function expandEnvPlaceholder(value: string | undefined): string | undefi
     if (!m) return value;
     return process.env[m[1]];
   }
+
+export function normalizeDiscordChannelId(value: string): string {
+  return value.startsWith("channel:") ? value.slice(8) : value;
+}
 
 
 type RuntimeConfigProvider = {
@@ -261,7 +263,6 @@ async function classifyEmotionViaOpenAI(
         },
       ],
       max_tokens: 10,
-      temperature: 0,
     }),
     signal,
   });
@@ -305,7 +306,6 @@ async function classifyEmotionViaAnthropic(
     body: JSON.stringify({
       model: modelId,
       max_tokens: 10,
-      temperature: 0,
       messages: [
         {
           role: "user",
@@ -354,7 +354,6 @@ async function classifyBooleanIntentViaOpenAI(
       model: modelId,
       messages: [{ role: "user", content: prompt }],
       max_tokens: 10,
-      temperature: 0,
     }),
     signal,
   });
@@ -404,7 +403,6 @@ async function classifyBooleanIntentViaAnthropic(
     body: JSON.stringify({
       model: modelId,
       max_tokens: 10,
-      temperature: 0,
       messages: [{ role: "user", content: prompt }],
     }),
     signal,
@@ -434,7 +432,86 @@ async function classifyCheerIntentViaAnthropic(
   return classifyBooleanIntentViaAnthropic(baseUrl, apiKey, modelId, buildCheerIntentPrompt(text), signal, logger, "cheer");
 }
 
+function buildOnboardingIntentPrompt(text: string): string {
+  return [
+    "Decide whether the user's message is requesting to set up, configure, create, change, or regenerate the bot's character images or emotion images.",
+    "This includes requests like: starting onboarding, setting up the character, changing the avatar, creating new emotion images, regenerating images, customizing the bot's appearance, etc.",
+    "Return ONLY yes or no.",
+    "Answer yes for any intent related to character/image setup, onboarding, or appearance customization.",
+    "Answer no for normal conversation, questions, commands, greetings, or unrelated requests.",
+    `Message: ${text}`,
+  ].join("\n");
+}
 
+export async function detectOnboardingIntentWithLLM(
+  classifierModel: string,
+  text: string,
+  runtime: {
+    config: {
+      current: () => { models?: { providers?: Record<string, { baseUrl?: string; api?: string }> } };
+    };
+    modelAuth: {
+      resolveApiKeyForProvider: (params: {
+        provider: string;
+        cfg?: unknown;
+      }) => Promise<{ apiKey?: string }>;
+    };
+  },
+  logger: { warn: (...args: any[]) => void },
+): Promise<boolean> {
+  const slashIdx = classifierModel.indexOf("/");
+  if (slashIdx === -1) {
+    logger.warn(`emotion-image: onboarding intent model "${classifierModel}" missing "/" separator`);
+    return false;
+  }
+  const providerName = classifierModel.slice(0, slashIdx);
+  const modelId = classifierModel.slice(slashIdx + 1);
+  if (!providerName || !modelId) {
+    logger.warn(`emotion-image: onboarding intent model "${classifierModel}" could not be parsed`);
+    return false;
+  }
+
+  const cfg = runtime.config.current();
+  const providerCfg = cfg.models?.providers?.[providerName];
+  if (!providerCfg?.baseUrl) {
+    logger.warn(`emotion-image: onboarding intent provider "${providerName}" not found or missing baseUrl`);
+    return false;
+  }
+
+  let apiKey: string | undefined;
+  try {
+    const auth = await runtime.modelAuth.resolveApiKeyForProvider({
+      provider: providerName,
+      cfg: cfg as unknown as Record<string, unknown> | undefined,
+    });
+    apiKey = auth.apiKey;
+  } catch (err) {
+    logger.warn(`emotion-image: failed to resolve onboarding intent apiKey: ${err}`);
+    return false;
+  }
+
+  if (!apiKey) {
+    logger.warn(`emotion-image: no onboarding intent apiKey resolved for "${providerName}"`);
+    return false;
+  }
+
+  const baseUrl = providerCfg.baseUrl.replace(/\/+$/, "");
+  const apiType: ApiType = detectApiType(providerCfg.api);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), LLM_TIMEOUT_MS);
+  try {
+    const prompt = buildOnboardingIntentPrompt(text);
+    const result = apiType === "anthropic-messages"
+      ? await classifyBooleanIntentViaAnthropic(baseUrl, apiKey, modelId, prompt, controller.signal, logger, "onboarding")
+      : await classifyBooleanIntentViaOpenAI(baseUrl, apiKey, modelId, prompt, controller.signal, logger, "onboarding");
+    return result ?? false;
+  } catch (err) {
+    logger.warn(`emotion-image: onboarding intent LLM call error: ${err}`);
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 export async function detectCheerIntentWithLLM(
   classifierModel: string,
@@ -534,9 +611,13 @@ interface EmotionImageVariant {
   buffer?: Buffer;
 }
 
-const DEFAULT_EMOTION_MAP: Record<string, EmotionImageConfig> = Object.fromEntries(
-  Object.entries(SHARED_DEFAULT_EMOTION_MAP).map(([k, v]) => [k, v as EmotionImageConfig]),
-);
+const DEFAULT_EMOTION_MAP: Record<string, EmotionImageConfig> = {
+  happy: "happy.png",
+  neutral: "neutral.png",
+  sorry: "sorry.png",
+  confused: "confused.png",
+  focused: "focused.png",
+};
 
 const LABEL_TOKEN_RE = /[\p{L}\p{N}]+/gu;
 const FILENAME_LABEL_SEPARATORS_RE = /[-_\s]+/g;
@@ -549,9 +630,38 @@ const AUTO_LABEL_STOPWORDS = new Set([
   "variant",
 ]);
 
-const EMOTION_RULES: Array<{ emotion: string; patterns: RegExp[] }> = SHARED_EMOTION_RULES;
+const EMOTION_RULES: Array<{ emotion: string; patterns: RegExp[] }> = [
+  {
+    emotion: "sorry",
+    patterns: [
+      /sorry|apolog|my bad|mistake|messed up|regret|oops/i,
+    ],
+  },
+  {
+    emotion: "happy",
+    patterns: [
+      /done|complete|succeed|fixed|shipped|great|awesome|excellent|perfect|nailed|pass|resolved|✅|🎉|🔥/i,
+      /proud|happy|fantastic|wonderful|congrats|celebrate|woohoo|yay/i,
+    ],
+  },
+  {
+    emotion: "confused",
+    patterns: [
+      /confused|unclear|not sure|strange|unknown cause|weird|unexpected/i,
+      /question|how do we|what should|any idea/i,
+    ],
+  },
+  {
+    emotion: "focused",
+    patterns: [
+      /investigating|debugging|analyzing|implementing|working on|coding|building/i,
+      /in progress|checking|processing|deploying|testing|verifying/i,
+    ],
+  },
 
-const DEFAULT_EMOTION = SHARED_DEFAULT_EMOTION;
+];
+
+const DEFAULT_EMOTION = "neutral";
 
 export interface CheerConfig {
   enabled?: boolean;
@@ -943,16 +1053,140 @@ export async function sendImageMessage(
   }
 }
 
+export function createRephraseProvider(
+  classifierModel: string,
+  runtime: {
+    config: {
+      current: () => { models?: { providers?: Record<string, { baseUrl?: string; api?: string }> } };
+    };
+    modelAuth: {
+      resolveApiKeyForProvider: (params: {
+        provider: string;
+        cfg?: unknown;
+      }) => Promise<{ apiKey?: string }>;
+    };
+  },
+  logger: { warn: (...args: any[]) => void },
+): RephraseProvider | undefined {
+  const slashIdx = classifierModel.indexOf("/");
+  if (slashIdx === -1) return undefined;
+
+  const providerName = classifierModel.slice(0, slashIdx);
+  const modelId = classifierModel.slice(slashIdx + 1);
+  if (!providerName || !modelId) return undefined;
+
+  return {
+    async rephrase(prompt: string, rejectionReason: string): Promise<string> {
+      const cfg = runtime.config.current();
+      const providerCfg = cfg.models?.providers?.[providerName];
+      if (!providerCfg?.baseUrl) {
+        logger.warn(`emotion-image: rephrase provider "${providerName}" not found`);
+        return prompt;
+      }
+
+      let apiKey: string | undefined;
+      try {
+        const auth = await runtime.modelAuth.resolveApiKeyForProvider({
+          provider: providerName,
+          cfg: cfg as unknown as Record<string, unknown> | undefined,
+        });
+        apiKey = auth.apiKey;
+      } catch {
+        return prompt;
+      }
+      if (!apiKey) return prompt;
+
+      const baseUrl = providerCfg.baseUrl.replace(/\/+$/, "");
+      const apiType = detectApiType(providerCfg.api);
+
+      const systemPrompt = [
+        "You are a prompt rephrasing assistant.",
+        "The user's image generation prompt was rejected by a content safety filter.",
+        "Rewrite the prompt to preserve the original creative intent while avoiding policy violations.",
+        "Return ONLY the rephrased prompt text, nothing else.",
+        "Do NOT explain what you changed.",
+      ].join(" ");
+
+      const userMessage = [
+        `Original prompt:\n${prompt}`,
+        `\nRejection reason:\n${rejectionReason}`,
+        "\nRewrite the prompt to avoid the safety filter while keeping the same artistic intent.",
+      ].join("");
+
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), LLM_TIMEOUT_MS);
+
+      try {
+        let rephrased: string | undefined;
+
+        if (apiType === "anthropic-messages") {
+          const url = `${baseUrl}/messages`;
+          const res = await fetch(url, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "x-api-key": apiKey,
+              "anthropic-version": "2023-06-01",
+            },
+            body: JSON.stringify({
+              model: modelId,
+              max_tokens: 1024,
+              system: systemPrompt,
+              messages: [{ role: "user", content: userMessage }],
+            }),
+            signal: controller.signal,
+          });
+          if (res.ok) {
+            const data = (await res.json()) as { content?: Array<{ text?: string }> };
+            rephrased = data?.content?.[0]?.text?.trim();
+          }
+        } else {
+          const url = `${baseUrl}/chat/completions`;
+          const res = await fetch(url, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${apiKey}`,
+            },
+            body: JSON.stringify({
+              model: modelId,
+              messages: [
+                { role: "system", content: systemPrompt },
+                { role: "user", content: userMessage },
+              ],
+              max_tokens: 1024,
+              temperature: 0.7,
+            }),
+            signal: controller.signal,
+          });
+          if (res.ok) {
+            const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+            rephrased = data?.choices?.[0]?.message?.content?.trim();
+          }
+        }
+
+        return rephrased || prompt;
+      } catch {
+        return prompt;
+      } finally {
+        clearTimeout(timer);
+      }
+    },
+  };
+}
+
 export async function handleCheerRequest(
   params: {
     token: string;
     channelId: string;
     imageDir: string;
     config: CheerConfig;
+    onboardingConfig?: OnboardingConfig;
+    rephraseProvider?: RephraseProvider;
     logger: { info: (...args: any[]) => void; warn: (...args: any[]) => void; error: (...args: any[]) => void };
   },
 ): Promise<void> {
-  const { token, channelId, imageDir, config, logger } = params;
+  const { token, channelId, imageDir, config, onboardingConfig, rephraseProvider, logger } = params;
   const baseImagePath = assertPathInside(imageDir, "base.png");
   await sendTextMessage(
     token,
@@ -964,12 +1198,13 @@ export async function handleCheerRequest(
   try {
     const options: GenerateOptions = {
       prompt: buildCheerPrompt(config.character),
-      model: config.model,
-      size: config.size ?? "1024x1024",
+      model: config.model ?? onboardingConfig?.model,
+      size: config.size ?? onboardingConfig?.size ?? "1024x1024",
       referenceImages:
         baseImagePath && existsSync(baseImagePath)
           ? [pngBufferToDataUrl(await readFile(baseImagePath))]
           : undefined,
+      rephraseProvider,
     };
     const buffer = await generateImage(options);
     await sendImageBufferMessage(
@@ -1253,6 +1488,7 @@ export default definePluginEntry({
       emotionRules?: Record<string, string[]>;
       classifierModel?: string;
       discordToken?: string;
+      onboarding?: OnboardingConfig;
       cheer?: CheerConfig;
       miracleMode?: boolean;
       miracleRateLimit?: number;
@@ -1262,7 +1498,7 @@ export default definePluginEntry({
 
     // Per-channel toggle
     const channelMode = pluginConfig.channels?.mode ?? "blocklist";
-    const channelList = new Set(pluginConfig.channels?.list ?? []);
+    const channelList = new Set((pluginConfig.channels?.list ?? []).map(normalizeDiscordChannelId));
     api.logger.info(`emotion-image: channel filter mode=${channelMode} list=[${[...channelList].join(',')}] (${channelList.size} entries)`);
     function isChannelEnabled(channelId: string): boolean {
       if (channelList.size === 0) return true; // no list = all enabled
@@ -1318,7 +1554,10 @@ export default definePluginEntry({
     const activeRules = buildEmotionRules(pluginConfig.emotionRules);
     const classifierModel = pluginConfig.classifierModel;
 
-    // Miracle mode configuration
+    const rephraseProvider = classifierModel
+      ? createRephraseProvider(classifierModel, api.runtime, api.logger)
+      : undefined;
+
     const miracleMode = pluginConfig.miracleMode ?? false;
     const miracleRateLimit = pluginConfig.miracleRateLimit ?? 10;
 
@@ -1344,6 +1583,23 @@ export default definePluginEntry({
       return queues;
     }
 
+    function getEmotionMapForChannel(channelId: string): Record<string, EmotionImageVariant[]> {
+      const overrides = loadChannelOverridesSync(imageDir);
+      const overrideSetId = overrides[channelId];
+      if (!overrideSetId || !manifest) return emotionMap;
+
+      const overrideSet = manifest.sets[overrideSetId];
+      if (!overrideSet) return emotionMap;
+
+      const overrideEmotionConfig = buildEmotionMapFromSet(overrideSetId, overrideSet) as unknown as Record<string, EmotionImageConfig>;
+      return Object.fromEntries(
+        Object.entries({
+          ...DEFAULT_EMOTION_MAP,
+          ...overrideEmotionConfig,
+        }).map(([emotion, config]) => [emotion, normalizeEmotionImageConfig(config)]),
+      );
+    }
+
     if (classifierModel) {
       api.logger.info(`emotion-image: LLM classifier enabled with model="${classifierModel}"`);
     }
@@ -1362,16 +1618,29 @@ export default definePluginEntry({
 
     api.logger.info(`emotion-image: token found (len=${botToken.length}), imageDir=${imageDir}`);
 
-
+    const onboardingIntentDetector: IntentDetector | undefined = classifierModel
+      ? async (text: string) => detectOnboardingIntentWithLLM(classifierModel, text, api.runtime, api.logger)
+      : undefined;
+    const onboardingConfig: OnboardingConfig = {
+      ...pluginConfig.onboarding,
+      persistDir: imageDir ? resolve(imageDir, ".onboarding-sessions") : undefined,
+    };
+    const onboardingRuntime = registerOnboarding(
+      api,
+      botToken,
+      resolveActiveImageDir,
+      onboardingConfig,
+      onboardingIntentDetector,
+      isChannelEnabled,
+      rephraseProvider,
+    );
 
       const cheerConfig = pluginConfig.cheer ?? {};
       const cheerEnabled = cheerConfig.enabled !== false;
       const cheerIntentModel = cheerConfig.intentModel ?? classifierModel;
 
       // Phase 1: On user message received, immediately send focused (thinking) image
-      const thinkingVariant = selectEmotionImageVariant(emotionMap.focused ?? []);
-
-      if (cheerEnabled || thinkingVariant) {
+      if (cheerEnabled || (emotionMap.focused?.length ?? 0) > 0) {
         api.on("message_received", async (event: unknown) => {
          const { content, metadata, senderId, sessionKey } = event as {
            content?: string;
@@ -1384,9 +1653,11 @@ export default definePluginEntry({
         // Extract Discord channel snowflake from metadata.to ("channel:ID" format)
         const rawTo = metadata?.to as string | undefined;
         if (!rawTo) return;
-          const discordChannelId = rawTo.startsWith("channel:") ? rawTo.slice(8) : rawTo;
+          const discordChannelId = normalizeDiscordChannelId(rawTo);
           if (!discordChannelId || !/^\d+$/.test(discordChannelId)) return;
           if (!isChannelEnabled(discordChannelId)) return;
+          const userId = senderId ?? (metadata?.from as string | undefined) ?? "unknown";
+          if (onboardingRuntime?.isOnboardingMessage(discordChannelId, userId, content, sessionKey)) return;
           const activeImageDir = resolveActiveImageDir({ metadata, sessionKey });
 
           if (
@@ -1395,16 +1666,20 @@ export default definePluginEntry({
            await detectCheerIntentWithLLM(cheerIntentModel, content, api.runtime, api.logger)
          ) {
            await handleCheerRequest({
-              token: botToken,
-              channelId: discordChannelId,
-              imageDir: activeImageDir,
-              config: cheerConfig,
-              logger: api.logger,
-           });
+               token: botToken,
+               channelId: discordChannelId,
+               imageDir: activeImageDir,
+               config: cheerConfig,
+               onboardingConfig: pluginConfig.onboarding,
+               rephraseProvider,
+               logger: api.logger,
+            });
            return;
          }
 
-          const thinkingImagePath = thinkingVariant ? assertPathInside(activeImageDir, thinkingVariant.filename) : null;
+           const channelEmotionMap = getEmotionMapForChannel(discordChannelId);
+           const thinkingVariant = selectEmotionImageVariant(channelEmotionMap.focused ?? []);
+           const thinkingImagePath = thinkingVariant ? assertPathInside(activeImageDir, thinkingVariant.filename) : null;
           if (!thinkingImagePath || !existsSync(thinkingImagePath)) return;
 
          api.logger.info(`emotion-image: received user msg, sending thinking image to channel=${discordChannelId}`);
@@ -1439,15 +1714,17 @@ export default definePluginEntry({
       // Skip NO_REPLY messages
       if (content.trim() === "NO_REPLY") return;
 
-      // Strip MEDIA: lines before emotion detection
-      const cleaned = content.replace(MEDIA_LINE_RE, "").trimEnd();
-
       // Strip channel: prefix from to field (OpenClaw passes "channel:ID" format)
-      const channelId = to.startsWith("channel:") ? to.slice(8) : to;
+      const channelId = normalizeDiscordChannelId(to);
+
+      const cleaned = content.replace(MEDIA_LINE_RE, "").trimEnd();
 
       // Per-channel toggle check
       if (!isChannelEnabled(channelId)) return;
 
+      // Skip emotion image attachment for channels with active onboarding sessions
+      // to prevent duplicate images (onboarding sends images directly via Discord API)
+      if (onboardingRuntime?.hasActiveSession(channelId)) return;
 
       // Resolve workspace context for isolation
       const context: ImageDirContext = { metadata, sessionKey };
@@ -1480,7 +1757,8 @@ export default definePluginEntry({
           finalEmotion = detectEmotion(cleaned, activeRules, activeEmotion);
         }
 
-          const variants = emotionMap[finalEmotion] ?? emotionMap[activeEmotion] ?? normalizeEmotionImageConfig("neutral.png");
+          const channelEmotionMap = getEmotionMapForChannel(channelId);
+          const variants = channelEmotionMap[finalEmotion] ?? channelEmotionMap[activeEmotion] ?? normalizeEmotionImageConfig("neutral.png");
 
           // Try to get cached or generate via miracle mode
           const imageBuffer = await getCachedOrGenerateImage(
