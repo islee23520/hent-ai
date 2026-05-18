@@ -1,9 +1,9 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
-import type { RephraseProvider } from "@hent-ai/generate";
-import { type Logger, sendTextMessage } from "./discord-utils.js";
-import { type FlowConfig, handleMessage, ONBOARDING_EXIT_HINT } from "./flow.js";
-import { EMOTIONS, OnboardingState, SessionManager } from "./session.js";
+import { SessionManager, OnboardingState, EMOTIONS } from "./session.js";
+import { parseIntent } from "./parsers.js";
+import { handleMessage, ONBOARDING_EXIT_HINT, type FlowConfig } from "./flow.js";
+import { sendTextMessage, type Logger } from "./discord-utils.js";
 
 /**
  * Check if emotion images already exist in the image directory.
@@ -84,14 +84,25 @@ export function registerOnboarding(
     }
   }
 
+  // Inline trigger detection to avoid jiti cache staleness.
+  // jiti hashes only the entry file (index.ts), not transitive deps like parsers.ts.
+  // When parsers.ts changes but index.ts doesn't, the old compiled code is served.
+  const TRIGGER_KEYWORDS = /봇|캐릭터|이미지|셋업|setup|onboarding|온보딩|생성|만들|바꾸/i;
+  const TRIGGER_ACTIONS = /하고|하자|해줘|해줄|시작|할래|하고파|할까|start|begin|want|원해|해봐|해보|만들|새로|다시|바꾸/i;
+  const TRIGGER_EXACT = /^(onboarding|온보딩|셋업|setup)[\s!.]*$/i;
+
+  function isOnboardingTrigger(text: string): boolean {
+    const trimmed = text.trim();
+    if (TRIGGER_EXACT.test(trimmed)) return true;
+    return TRIGGER_KEYWORDS.test(trimmed) && TRIGGER_ACTIONS.test(trimmed);
+  }
+
   const runtime: OnboardingRuntime = {
     isOnboardingMessage: (channelId, userId, content) => {
       // For sync check, only look at active sessions.
       // Trigger detection is async (LLM) and handled in the message_received hook.
       const trimmed = content.trim();
-      // Keep regex as fast-path for exact keywords
-      if (isTrigger(trimmed)) return true;
-      // Active session check (sync)
+      if (isOnboardingTrigger(trimmed)) return true;
       return sessions.get(channelId, userId) !== null;
     },
     hasActiveSession: (channelId) => sessions.getByChannel(channelId) !== null,
@@ -121,18 +132,8 @@ export function registerOnboarding(
       const trimmed = content.trim();
       const activeImageDir = resolveImageDir({ metadata, sessionKey });
 
-      // LLM-based intent detection for onboarding trigger
-      const isOnboardingRequest = detectIntent ? await detectIntent(trimmed) : false;
-
-      if (isOnboardingRequest) {
-        logger.info(`onboarding: LLM detected onboarding intent from user=${userId} text="${trimmed.slice(0, 50)}"`);
-      // Fast-path: exact keyword match, or LLM intent detection
-      const isExactTrigger = isTrigger(trimmed);
-      const isLlmTrigger = !isExactTrigger && detectOnboardingIntent
-        ? await detectOnboardingIntent(trimmed).catch(() => false)
-        : false;
-
-      if (isExactTrigger || isLlmTrigger) {
+      if (isOnboardingTrigger(trimmed)) {
+        logger.info(`onboarding: trigger detected from user=${userId} text="${trimmed.slice(0, 50)}"`);
         const existing = sessions.getByChannel(channelId);
         if (existing && existing.userId !== sessionScope) {
           await sendTextMessage(
