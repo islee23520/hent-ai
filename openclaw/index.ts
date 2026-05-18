@@ -263,7 +263,6 @@ async function classifyEmotionViaOpenAI(
         },
       ],
       max_tokens: 10,
-      temperature: 0,
     }),
     signal,
   });
@@ -307,7 +306,6 @@ async function classifyEmotionViaAnthropic(
     body: JSON.stringify({
       model: modelId,
       max_tokens: 10,
-      temperature: 0,
       messages: [
         {
           role: "user",
@@ -356,7 +354,6 @@ async function classifyBooleanIntentViaOpenAI(
       model: modelId,
       messages: [{ role: "user", content: prompt }],
       max_tokens: 10,
-      temperature: 0,
     }),
     signal,
   });
@@ -406,7 +403,6 @@ async function classifyBooleanIntentViaAnthropic(
     body: JSON.stringify({
       model: modelId,
       max_tokens: 10,
-      temperature: 0,
       messages: [{ role: "user", content: prompt }],
     }),
     signal,
@@ -618,7 +614,6 @@ interface EmotionImageVariant {
 const DEFAULT_EMOTION_MAP: Record<string, EmotionImageConfig> = {
   happy: "happy.png",
   neutral: "neutral.png",
-  loyalty: "loyalty.png",
   sorry: "sorry.png",
   confused: "confused.png",
   focused: "focused.png",
@@ -663,12 +658,7 @@ const EMOTION_RULES: Array<{ emotion: string; patterns: RegExp[] }> = [
       /in progress|checking|processing|deploying|testing|verifying/i,
     ],
   },
-  {
-    emotion: "loyalty",
-    patterns: [
-      /got it|understood|on it|yes sir|will do|right away|hello|hi there/i,
-    ],
-  },
+
 ];
 
 const DEFAULT_EMOTION = "neutral";
