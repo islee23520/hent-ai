@@ -7,7 +7,7 @@
 
 "Hent" is a coined word meaning "intent".
 
-Hent-ai automatically classifies the emotion of every bot response and attaches a matching emotion image. It supports **OpenClaw**, **Hermes Agent**, and **Cursor** platforms.
+Hent-ai automatically classifies the emotion of every bot response and attaches a matching emotion image. It supports **OpenClaw** and **Cursor** platforms.
 
 ### Supported Emotions
 
@@ -27,7 +27,6 @@ Hent-ai automatically classifies the emotion of every bot response and attaches 
 Choose your platform:
 
 - **OpenClaw** → see [`openclaw/README.md`](./openclaw/README.md)
-- **Hermes Agent** → see [`hermes/README.md`](./hermes/README.md)
 - **Cursor** → see [`cursor/README.md`](./cursor/README.md)
 
 ## Creating Emotion Images
@@ -66,6 +65,13 @@ The tool first generates a base character image, then uses it as a reference to 
 | `-m, --model` | Codex model | `gpt-5.4` |
 | `-s, --size` | Image size (e.g. `1024x1024`) | `1024x1024` |
 | `--no-keep-base` | Don't save base.png to output | — |
+
+**Reference Image Limits:**
+
+- Maximum **3 reference images** per generation request
+- Images larger than 768px are automatically resized (preserving aspect ratio) to reduce payload size and prevent timeouts
+- If a prompt triggers a content-policy rejection and a `classifierModel` is configured, the prompt is automatically rephrased and retried (up to 3 attempts)
+- **CLI limitation**: `hent-ai generate` does not support automatic safety rephrase — it uses Codex auth only, with no separate LLM provider for prompt rewriting. Use OpenClaw's Discord onboarding for automatic rephrase on content-policy rejections.
 
 ### Option B: Manual Creation
 

@@ -15,6 +15,20 @@
         "confused": ["confused.png"],
         "focused": ["focused.png"]
       }
+    },
+    "private": {
+      "name": "Private Gothic Girl",
+      "character": "anime girl with long dark burgundy/wine wavy hair, red-pink eyes, black lace bikini with dark red accents, circular hair ornament, drop earrings, dark moody background",
+      "model": "openai/gpt-image-2",
+      "createdAt": "2026-05-17T21:00:00+09:00",
+      "emotions": {
+        "happy": ["happy.png"],
+        "neutral": ["neutral.png"],
+        "loyalty": ["loyalty.png"],
+        "sorry": ["sorry.png"],
+        "confused": ["confused.png"],
+        "focused": ["focused.png"]
+      }
     }
   }
 }
