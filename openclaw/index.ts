@@ -1642,6 +1642,15 @@ export default definePluginEntry({
     }
 
     function getEmotionMapForChannel(channelId: string): Record<string, EmotionImageVariant[]> {
+      // When a profile is mapped via DB, use flat filenames (profile dirs have flat structure)
+      if (profileDb) {
+        const profileId = profileDb.getChannelProfile(channelId) ?? defaultProfileId;
+        if (profileId && profileDb.getProfile(profileId)) {
+          return Object.fromEntries(
+            Object.entries(DEFAULT_EMOTION_MAP).map(([emotion, config]) => [emotion, normalizeEmotionImageConfig(config)]),
+          );
+        }
+      }
       const overrides = loadChannelOverridesSync(imageDir);
       const overrideSetId = overrides[channelId];
       if (!overrideSetId || !manifest) return emotionMap;
