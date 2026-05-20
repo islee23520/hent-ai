@@ -88,6 +88,11 @@ jobs:
         with:
           node-version: 22
 
+      - name: Install shared dependencies
+        if: steps.check.outputs.exists == 'true'
+        working-directory: shared
+        run: npm install --no-audit --no-fund
+
       - name: Install dependencies
         if: steps.check.outputs.exists == 'true'
         working-directory: generate
