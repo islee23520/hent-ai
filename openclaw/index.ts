@@ -8,8 +8,16 @@ import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { sendImageBufferMessage, sendTextMessage, type OpenClawMessageSender } from "./discord-utils.js";
 import { loadManifestSync, buildEmotionMapFromSet, getActiveSet } from "./assets/manifest.js";
 import { loadChannelOverridesSync } from "./assets/channel-overrides.js";
+import {
+  createChannelEnabledResolver,
+  createProfileDbChannelEnableStore,
+  normalizeDiscordChannelId,
+  type ChannelFilterConfig,
+} from "./channel-filter.js";
 import { runMigration } from "./migration.js";
 import { getProfileDatabase, resolveProfileImageDirForChannel } from "./profile-manager.js";
+
+export { normalizeDiscordChannelId } from "./channel-filter.js";
 
 const LLM_TIMEOUT_MS = 15_000;
 
@@ -94,10 +102,6 @@ export function expandEnvPlaceholder(value: string | undefined): string | undefi
     if (!m) return value;
     return process.env[m[1]];
   }
-
-export function normalizeDiscordChannelId(value: string): string {
-  return value.startsWith("channel:") ? value.slice(8) : value;
-}
 
 export function isOnboardingActive(imageDir: string, activeImageDir?: string): boolean {
   const rootDir = resolve(imageDir);
@@ -1490,7 +1494,7 @@ export default definePluginEntry({
       enabled?: boolean;
       imageDir?: string;
       emotionMap?: Record<string, EmotionImageConfig>;
-      channels?: { mode?: "allowlist" | "blocklist"; list?: string[] };
+      channels?: ChannelFilterConfig;
       defaultEmotion?: string;
       emotionRules?: Record<string, string[]>;
       classifierModel?: string;
@@ -1506,16 +1510,6 @@ export default definePluginEntry({
     if (pluginConfig.enabled === false) return;
 
     const defaultProfileId = pluginConfig.defaultProfile;
-
-    // Per-channel toggle
-    const channelMode = pluginConfig.channels?.mode ?? "blocklist";
-    const channelList = new Set((pluginConfig.channels?.list ?? []).map(normalizeDiscordChannelId));
-    api.logger.info(`emotion-image: channel filter mode=${channelMode} list=[${[...channelList].join(',')}] (${channelList.size} entries)`);
-    function isChannelEnabled(channelId: string): boolean {
-      if (channelList.size === 0) return true; // no list = all enabled
-      if (channelMode === "allowlist") return channelList.has(channelId);
-      return !channelList.has(channelId); // blocklist
-    }
 
     const extensionDir = dirname(fileURLToPath(import.meta.url));
     const resolveActiveImageDir = (context?: ImageDirContext) =>
@@ -1538,6 +1532,15 @@ export default definePluginEntry({
       try { return getProfileDatabase(imageDir); }
       catch { return null; }
     })();
+
+    const isChannelEnabled = createChannelEnabledResolver(
+      pluginConfig.channels,
+      createProfileDbChannelEnableStore(profileDb),
+    );
+    const channelConfigSummary = pluginConfig.channels?.overrides
+      ? `defaultEnabled=${pluginConfig.channels.defaultEnabled ?? true} overrides=[${Object.keys(pluginConfig.channels.overrides).map(normalizeDiscordChannelId).join(",")}]`
+      : `legacyMode=${pluginConfig.channels?.mode ?? "blocklist"} legacyList=[${(pluginConfig.channels?.list ?? []).map(normalizeDiscordChannelId).join(",")}]`;
+    api.logger.info(`emotion-image: channel control ${channelConfigSummary} db=${profileDb ? "enabled" : "unavailable"}`);
 
     if (defaultProfileId) {
       api.logger.info(`emotion-image: defaultProfile="${defaultProfileId}"`);
@@ -1615,7 +1618,24 @@ export default definePluginEntry({
       return queues;
     }
 
+    function getChannelAssetSetId(channelId: string): string | null {
+      const setId = profileDb?.getChannelAssetSet(channelId) ?? loadChannelOverridesSync(imageDir)[channelId];
+      return setId && manifest?.sets[setId] ? setId : null;
+    }
+
     function getEmotionMapForChannel(channelId: string): Record<string, EmotionImageVariant[]> {
+      const overrideSetId = getChannelAssetSetId(channelId);
+      if (overrideSetId && manifest) {
+        const overrideSet = manifest.sets[overrideSetId];
+        const overrideEmotionConfig = buildEmotionMapFromSet(overrideSetId, overrideSet) as unknown as Record<string, EmotionImageConfig>;
+        return Object.fromEntries(
+          Object.entries({
+            ...DEFAULT_EMOTION_MAP,
+            ...overrideEmotionConfig,
+          }).map(([emotion, config]) => [emotion, normalizeEmotionImageConfig(config)]),
+        );
+      }
+
       // When a profile is mapped via DB, use flat filenames (profile dirs have flat structure)
       if (profileDb) {
         const profileId = profileDb.getChannelProfile(channelId) ?? defaultProfileId;
@@ -1625,20 +1645,8 @@ export default definePluginEntry({
           );
         }
       }
-      const overrides = loadChannelOverridesSync(imageDir);
-      const overrideSetId = overrides[channelId];
-      if (!overrideSetId || !manifest) return emotionMap;
 
-      const overrideSet = manifest.sets[overrideSetId];
-      if (!overrideSet) return emotionMap;
-
-      const overrideEmotionConfig = buildEmotionMapFromSet(overrideSetId, overrideSet) as unknown as Record<string, EmotionImageConfig>;
-      return Object.fromEntries(
-        Object.entries({
-          ...DEFAULT_EMOTION_MAP,
-          ...overrideEmotionConfig,
-        }).map(([emotion, config]) => [emotion, normalizeEmotionImageConfig(config)]),
-      );
+      return emotionMap;
     }
 
     if (classifierModel) {
@@ -1686,10 +1694,12 @@ export default definePluginEntry({
             api.logger.info(`emotion-image: date mode active for channel=${discordChannelId}, skipping thinking image`);
             return;
           }
-          // Use profile DB to resolve channel-specific image directory
-          const activeImageDir = profileDb
-            ? resolveProfileImageDirForChannel(imageDir, profileDb, discordChannelId, defaultProfileId)
-            : resolveActiveImageDir({ metadata, sessionKey });
+          // Asset-set overrides use the root imageDir; profiles use flat profile dirs.
+          const activeImageDir = getChannelAssetSetId(discordChannelId)
+            ? imageDir
+            : profileDb
+              ? resolveProfileImageDirForChannel(imageDir, profileDb, discordChannelId, defaultProfileId)
+              : resolveActiveImageDir({ metadata, sessionKey });
 
           // Agent-driven onboarding: skip emotion images when lock file exists
           if (isOnboardingActive(imageDir, activeImageDir)) return;
@@ -1751,6 +1761,7 @@ export default definePluginEntry({
 
       // Strip channel: prefix from to field (OpenClaw passes "channel:ID" format)
       const channelId = normalizeDiscordChannelId(to);
+      if (!channelId || !/^\d+$/.test(channelId)) return;
 
       const cleaned = content.replace(MEDIA_LINE_RE, "").trimEnd();
 
@@ -1761,10 +1772,12 @@ export default definePluginEntry({
       const context: ImageDirContext = { metadata, sessionKey };
       const runtimeConfig = api.runtime.config?.current?.();
       const workspaceId = resolveProfileWorkspaceId(runtimeConfig, context) ?? "default";
-      // Use profile DB to resolve channel-specific image directory
-      const activeImageDir = profileDb
-        ? resolveProfileImageDirForChannel(imageDir, profileDb, channelId, defaultProfileId)
-        : resolveActiveImageDir(context);
+      // Asset-set overrides use the root imageDir; profiles use flat profile dirs.
+      const activeImageDir = getChannelAssetSetId(channelId)
+        ? imageDir
+        : profileDb
+          ? resolveProfileImageDirForChannel(imageDir, profileDb, channelId, defaultProfileId)
+          : resolveActiveImageDir(context);
       if (isOnboardingActive(imageDir, activeImageDir)) return;
       const rateLimiter = getRateLimiterForWorkspace(workspaceId);
       const channelQueues = getChannelQueuesForWorkspace(workspaceId);
